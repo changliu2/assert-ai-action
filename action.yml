@@ -35,7 +35,7 @@ inputs:
     required: false
     default: 'true'
   allow-inconclusive:
-    description: 'When true (default), Inconclusive verdicts PASS the gate. Set to false to make Inconclusive WARN.'
+    description: 'Labeling only. When false, statistically insignificant dimensions are reported as Uncertain (per-dimension) and the overall verdict becomes WARN instead of Inconclusive. The job still passes in both cases — use a separate gate (or future fail-on-inconclusive input) to fail the build on inconclusive results.'
     required: false
     default: 'true'
   extras:
@@ -68,9 +68,15 @@ runs:
 
     - name: Install assert-ai
       shell: bash
+      env:
+        ASSERT_AI_EXTRAS: ${{ inputs.extras }}
       run: |
         python -m pip install --upgrade pip
-        python -m pip install "assert-ai[${{ inputs.extras }}]==0.1.0"
+        if [ -n "$ASSERT_AI_EXTRAS" ]; then
+          python -m pip install "assert-ai[${ASSERT_AI_EXTRAS}]==0.1.0"
+        else
+          python -m pip install "assert-ai==0.1.0"
+        fi
 
     - name: Freeze the eval config for CI
       shell: bash
@@ -180,186 +186,24 @@ runs:
     - name: Write FirstRun report
       if: ${{ steps.baseline.outputs.baseline-available != 'true' }}
       shell: bash
-      env:
-        CURRENT_RUN_ROOT: ${{ steps.locate-current.outputs.current-run-root }}
-        BASELINE_REASON: ${{ steps.baseline.outputs.baseline-reason }}
       run: |
-        python <<'PY'
-        import json
-        import os
-        from pathlib import Path
-
-        ACTION_VERSION = "v1.0.0-rc1"
-
-        def find_file(root: Path, name: str) -> Path | None:
-            direct = root / name
-            if direct.is_file():
-                return direct
-            matches = sorted(p for p in root.rglob(name) if p.is_file())
-            return matches[0] if matches else None
-
-        def current_stats(root: Path) -> tuple[int, float]:
-            scores = find_file(root, "scores.jsonl")
-            rows = []
-            if scores and scores.is_file():
-                for line in scores.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        rows.append(json.loads(line))
-            if not rows:
-                test_set = find_file(root, "test_set.jsonl")
-                if test_set and test_set.is_file():
-                    n = sum(1 for line in test_set.read_text(encoding="utf-8").splitlines() if line.strip())
-                    return n, 0.0
-                return 0, 0.0
-            violations = 0
-            for row in rows:
-                dims = ((row.get("verdict") or {}).get("dimensions") or {})
-                if any(value is True for value in dims.values()):
-                    violations += 1
-            return len(rows), violations / len(rows) if rows else 0.0
-
-        root = Path(os.environ["CURRENT_RUN_ROOT"])
-        n_cases, violation_rate = current_stats(root)
-        report = {
-            "action_version": ACTION_VERSION,
-            "decision": "FirstRun",
-            "n_paired_cases": 0,
-            "current_n_cases": n_cases,
-            "current_violation_rate": violation_rate,
-            "warnings": [os.environ.get("BASELINE_REASON") or "no baseline to compare against"],
-            "dimensions": [],
-        }
-        Path("gate_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        Path("pr_comment.md").write_text(
-            "## 🛡️ ASSERT — safety regression gate\n\n"
-            "**Gate: 🆕 FirstRun**\n\n"
-            f"🆕 First run on this branch — no baseline to compare. The current run is "
-            f"`{n_cases}` test cases, `{violation_rate:.1%}` overall violation rate. "
-            "Once this merges, future PRs will pair-test against it.\n",
-            encoding="utf-8",
-        )
-        PY
+        python "${{ github.action_path }}/scripts/write_firstrun_report.py" \
+          --current-run-root "${{ steps.locate-current.outputs.current-run-root }}" \
+          --baseline-reason "${{ steps.baseline.outputs.baseline-reason }}" \
+          --out gate_report.json \
+          --pr-comment pr_comment.md
 
     - name: Detect test-set drift
       id: drift
       if: ${{ steps.baseline.outputs.baseline-available == 'true' }}
       shell: bash
-      env:
-        BASELINE_ROOT: ${{ steps.baseline.outputs.baseline-root }}
-        CURRENT_RUN_ROOT: ${{ steps.locate-current.outputs.current-run-root }}
-        ARTIFACTS_ROOT: ${{ github.workspace }}/assert-ai-artifacts
       run: |
-        python <<'PY'
-        import hashlib
-        import json
-        import os
-        from pathlib import Path
-
-        ACTION_VERSION = "v1.0.0-rc1"
-
-        def emit(**values: str) -> None:
-            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-                for key, value in values.items():
-                    print(f"{key}={value}", file=f)
-
-        def find_file(root: Path, name: str) -> Path | None:
-            if not root.exists():
-                return None
-            direct = root / name
-            if direct.is_file():
-                return direct
-            matches = sorted(p for p in root.rglob(name) if p.is_file())
-            return matches[0] if matches else None
-
-        def sha256(path: Path) -> str:
-            h = hashlib.sha256()
-            with path.open("rb") as f:
-                for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                    h.update(chunk)
-            return h.hexdigest()
-
-        def current_stats(root: Path) -> tuple[int, float]:
-            scores = find_file(root, "scores.jsonl")
-            rows = []
-            if scores and scores.is_file():
-                for line in scores.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        rows.append(json.loads(line))
-            violations = 0
-            for row in rows:
-                dims = ((row.get("verdict") or {}).get("dimensions") or {})
-                if any(value is True for value in dims.values()):
-                    violations += 1
-            return len(rows), violations / len(rows) if rows else 0.0
-
-        baseline_root = Path(os.environ["BASELINE_ROOT"])
-        current_root = Path(os.environ["CURRENT_RUN_ROOT"])
-        artifacts_root = Path(os.environ["ARTIFACTS_ROOT"])
-        baseline_test = find_file(baseline_root, "test_set.jsonl")
-        current_test = find_file(current_root, "test_set.jsonl") or find_file(artifacts_root, "test_set.jsonl")
-
-        if baseline_test is None:
-            report = {
-                "action_version": ACTION_VERSION,
-                "decision": "FirstRun",
-                "n_paired_cases": 0,
-                "warnings": ["baseline is missing test_set.jsonl"],
-                "dimensions": [],
-            }
-            Path("gate_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-            Path("pr_comment.md").write_text(
-                "## 🛡️ ASSERT — safety regression gate\n\n"
-                "**Gate: 🆕 FirstRun**\n\n"
-                "🆕 First run on this branch — no usable baseline test set was found. "
-                "Once this merges, future PRs will pair-test against it.\n",
-                encoding="utf-8",
-            )
-            emit(**{"skip-compare": "true", "gate-verdict": "FirstRun"})
-            raise SystemExit(0)
-
-        if current_test is None:
-            raise SystemExit("current run did not produce test_set.jsonl; cannot validate paired cases")
-
-        baseline_sha = sha256(baseline_test)
-        current_sha = sha256(current_test)
-        if baseline_sha == current_sha:
-            emit(**{
-                "skip-compare": "false",
-                "gate-verdict": "",
-                "baseline-test-set-sha": baseline_sha,
-                "current-test-set-sha": current_sha,
-            })
-            raise SystemExit(0)
-
-        n_cases, violation_rate = current_stats(current_root)
-        report = {
-            "action_version": ACTION_VERSION,
-            "decision": "TestSetChanged",
-            "n_paired_cases": 0,
-            "current_n_cases": n_cases,
-            "current_violation_rate": violation_rate,
-            "baseline_test_set_sha256": baseline_sha,
-            "current_test_set_sha256": current_sha,
-            "baseline_test_set_path": str(baseline_test),
-            "current_test_set_path": str(current_test),
-            "warnings": ["test_set.jsonl changed; paired t-test skipped"],
-            "dimensions": [],
-        }
-        Path("gate_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        Path("pr_comment.md").write_text(
-            "## 🛡️ ASSERT — safety regression gate\n\n"
-            "**Gate: 🔄 TestSetChanged**\n\n"
-            f"🔄 Test set changed (baseline SHA: `{baseline_sha[:7]}`, current SHA: `{current_sha[:7]}`) — "
-            "paired t-test skipped. This is a baseline-refresh PR; merge to make it the new baseline.\n",
-            encoding="utf-8",
-        )
-        emit(**{
-            "skip-compare": "true",
-            "gate-verdict": "TestSetChanged",
-            "baseline-test-set-sha": baseline_sha,
-            "current-test-set-sha": current_sha,
-        })
-        PY
+        python "${{ github.action_path }}/scripts/detect_test_set_drift.py" \
+          --baseline-root "${{ steps.baseline.outputs.baseline-root }}" \
+          --current-run-root "${{ steps.locate-current.outputs.current-run-root }}" \
+          --artifacts-root "${{ github.workspace }}/assert-ai-artifacts" \
+          --out gate_report.json \
+          --pr-comment pr_comment.md
 
     - name: Run the paired gate
       if: ${{ steps.baseline.outputs.baseline-available == 'true' && steps.drift.outputs.skip-compare != 'true' }}
@@ -414,6 +258,8 @@ runs:
     - name: Decide exit code
       id: decide
       shell: bash
+      env:
+        FAIL_ON_REGRESSION: ${{ inputs.fail-on-regression }}
       run: |
         python <<'PY'
         import json
@@ -421,7 +267,7 @@ runs:
         import sys
         from pathlib import Path
 
-        def as_bool(value: str, *, default: bool) -> bool:
+        def as_bool(value: str | None, *, default: bool) -> bool:
             if value is None or value == "":
                 return default
             return value.strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -440,12 +286,12 @@ runs:
             print(f"n-paired-cases={n_pairs}", file=f)
 
         print(f"Gate verdict: {verdict}")
-        fail_on_regression = as_bool("${{ inputs.fail-on-regression }}", default=True)
-        allow_inconclusive = as_bool("${{ inputs.allow-inconclusive }}", default=True)
+        fail_on_regression = as_bool(os.environ.get("FAIL_ON_REGRESSION"), default=True)
 
+        # FAIL is the only blocking verdict today. WARN (TooFewSamples, Uncertain,
+        # no-overlap), Inconclusive, FirstRun, and TestSetChanged are intentional
+        # fail-open states — see docs/verdicts.md.
         if verdict == "FAIL" and fail_on_regression:
             print("::error::ASSERT safety regression detected — see gate_report.json and the PR comment.")
             sys.exit(1)
-        if verdict == "Inconclusive" and not allow_inconclusive:
-            print("::warning::ASSERT gate was inconclusive; allow-inconclusive=false keeps this as a warning.")
         PY

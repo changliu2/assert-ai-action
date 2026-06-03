@@ -63,7 +63,7 @@ First run on `main` creates the baseline artifact. PR runs download that baselin
 | `post-pr-comment` | no | `true` | Upsert a Markdown gate report on pull requests. |
 | `comment-marker` | no | `<!-- assert-ai-gate -->` | Marker used to update one stable PR comment. |
 | `fail-on-regression` | no | `true` | Exit 1 when the verdict is `FAIL`. |
-| `allow-inconclusive` | no | `true` | Let statistically inconclusive results pass; set false to warn. |
+| `allow-inconclusive` | no | `true` | Labeling only. When false, insignificant dimensions are reported as `Uncertain` and the top-level verdict becomes `WARN` instead of `Inconclusive`. Does **not** change job pass/fail — see [`docs/verdicts.md`](docs/verdicts.md). |
 | `extras` | no | `regression` | Comma-separated PyPI extras, e.g. `regression,otel,langgraph`. |
 
 ## Outputs
