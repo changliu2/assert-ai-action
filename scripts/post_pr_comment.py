@@ -168,7 +168,7 @@ def github_api(method: str, endpoint: str, data: dict[str, Any] | None = None) -
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "assert-ai-action",
+        "User-Agent": "assert-action",
     }
     try:
         return _api_with_requests(method, url, headers, data)
