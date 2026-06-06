@@ -1,0 +1,80 @@
+name: Test action helpers
+
+on: [push, pull_request]
+
+jobs:
+  fixture-gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install helper dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy scipy
+      - name: Run paired gate against fixture artifacts
+        run: |
+          python scripts/compare_runs.py \
+            --baseline tests/fixtures/baseline \
+            --current tests/fixtures/current \
+            --out gate_report.json \
+            --pr-comment pr_comment.md
+          python - <<'PY'
+          import json
+          report = json.load(open('gate_report.json', encoding='utf-8'))
+          assert report['decision'] in {'PASS', 'WARN', 'FAIL', 'Inconclusive'}
+          assert report['n_paired_cases'] == 30
+          print(report['decision'])
+          PY
+      - name: Smoke-test write_firstrun_report.py
+        run: |
+          python scripts/write_firstrun_report.py \
+            --current-run-root tests/fixtures/current \
+            --baseline-reason 'fixture smoke test' \
+            --out gate_report.firstrun.json \
+            --pr-comment pr_comment.firstrun.md
+          python - <<'PY'
+          import json
+          report = json.load(open('gate_report.firstrun.json', encoding='utf-8'))
+          assert report['decision'] == 'FirstRun', report['decision']
+          assert report['current_n_cases'] == 30, report['current_n_cases']
+          assert report['n_paired_cases'] == 0
+          assert 'fixture smoke test' in report['warnings']
+          assert open('pr_comment.firstrun.md', encoding='utf-8').read().startswith('## 🛡️ ASSERT')
+          print('FirstRun report OK')
+          PY
+      - name: Smoke-test detect_test_set_drift.py (matching SHAs)
+        run: |
+          python scripts/detect_test_set_drift.py \
+            --baseline-root tests/fixtures/baseline \
+            --current-run-root tests/fixtures/current \
+            --artifacts-root tests/fixtures/current \
+            --out gate_report.drift.json \
+            --pr-comment pr_comment.drift.md
+          # Fixtures share an identical test_set.jsonl, so the script must take
+          # the matching-SHAs path: skip-compare=false to GITHUB_OUTPUT, no
+          # gate_report.json or pr_comment.md written.
+          python - <<'PY'
+          import os, pathlib
+          out = pathlib.Path(os.environ['GITHUB_OUTPUT']).read_text(encoding='utf-8')
+          assert 'skip-compare=false' in out, out
+          assert 'baseline-test-set-sha=' in out, out
+          assert 'current-test-set-sha=' in out, out
+          assert not pathlib.Path('gate_report.drift.json').exists()
+          assert not pathlib.Path('pr_comment.drift.md').exists()
+          print('TestSetDrift (matching) OK')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fixture-gate-report
+          path: |
+            gate_report.json
+            pr_comment.md
+            gate_report.firstrun.json
+            pr_comment.firstrun.md
+          if-no-files-found: warn
