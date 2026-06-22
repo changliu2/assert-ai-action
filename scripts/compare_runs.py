@@ -14,6 +14,9 @@ Verdicts (per dimension):
   - Uncertain       -- no significant change when ``--allow-inconclusive false``
   - TooFewSamples   -- < ``--min-pairs`` paired cases (WARN, no block)
 
+Holm-Bonferroni is applied as a step-down procedure: ordered hypotheses are
+rejected only until the first p-value misses its rank-adjusted threshold.
+
 Overall gate:
   - FAIL          -- any dimension is Regressed
   - WARN          -- no Regressed, but at least one TooFewSamples or Uncertain
@@ -117,29 +120,40 @@ def _find_scores_jsonl(root: Path) -> Path:
 def _verdict_for(
     *,
     delta_pp: float,
-    p_value: float,
-    alpha: float,
+    rejected: bool,
     n_pairs: int,
     min_pairs: int,
     allow_inconclusive: bool,
 ) -> str:
     if n_pairs < min_pairs:
         return "TooFewSamples"
-    if p_value >= alpha:
+    if not rejected:
         return "Inconclusive" if allow_inconclusive else "Uncertain"
     return "Regressed" if delta_pp > 0 else "Improved"
 
 
-def _holm_bonferroni(p_values: list[float], alpha: float) -> list[float]:
-    """Return per-dimension Holm-corrected alpha thresholds."""
+def _holm_bonferroni_rejections(p_values: list[float], alpha: float) -> list[tuple[float, bool]]:
+    """Return ``(threshold, rejected)`` for each p-value using Holm step-down.
+
+    Holm-Bonferroni is a sequential procedure: once the first ordered p-value
+    fails its threshold, later hypotheses are not rejected even if their own
+    per-rank threshold is larger. Returning the per-rank thresholds alone is not
+    enough because checking each p-value independently can reject a later
+    hypothesis after an earlier one failed.
+    """
     m = len(p_values)
     if m == 0:
         return []
     order = sorted(range(m), key=lambda i: p_values[i])
-    thresholds = [0.0] * m
+    results: list[tuple[float, bool]] = [(0.0, False)] * m
+    still_rejecting = True
     for rank, idx in enumerate(order):
-        thresholds[idx] = alpha / (m - rank)
-    return thresholds
+        threshold = alpha / (m - rank)
+        rejected = still_rejecting and p_values[idx] <= threshold
+        results[idx] = (threshold, rejected)
+        if not rejected:
+            still_rejecting = False
+    return results
 
 
 def _overall_decision(entries: list[dict[str, Any]]) -> str:
@@ -240,18 +254,18 @@ def compare(
         )
         p_values.append(p_value)
 
-    thresholds = _holm_bonferroni(p_values, alpha)
-    for entry, threshold in zip(raw, thresholds):
+    holm_results = _holm_bonferroni_rejections(p_values, alpha)
+    for entry, (threshold, rejected) in zip(raw, holm_results):
         n = entry.get("n_pairs", 0)
         verdict = _verdict_for(
             delta_pp=entry.get("delta_pp", 0.0),
-            p_value=entry.get("p_value", 1.0),
-            alpha=threshold if threshold > 0 else alpha,
+            rejected=rejected,
             n_pairs=n,
             min_pairs=min_pairs,
             allow_inconclusive=allow_inconclusive,
         )
         entry["alpha_corrected"] = threshold
+        entry["holm_rejected"] = rejected
         entry["verdict"] = verdict
 
     return {
