@@ -11,7 +11,7 @@ A baseline is the trusted ASSERT artifact set that PRs compare against. It must 
 Run the action on `main` after a trusted merge, then upload `assert-ai-artifacts/` as a GitHub Actions artifact named `assert-ai-baseline`.
 
 ```yaml
-- uses: responsibleai/assert-ai-action@v1
+- uses: responsibleai/assert-action@v1
   with:
     config: eval/eval_config.yaml
     azure-api-key: ${{ secrets.AZURE_API_KEY }}
@@ -38,7 +38,7 @@ Download the latest trusted baseline artifact before invoking the action, then p
   with:
     name: assert-ai-baseline
     path: assert-ai-baseline
-- uses: responsibleai/assert-ai-action@v1
+- uses: responsibleai/assert-action@v1
   with:
     config: eval/eval_config.yaml
     baseline: assert-ai-baseline

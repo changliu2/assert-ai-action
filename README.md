@@ -34,7 +34,7 @@ jobs:
         with:
           name: assert-ai-baseline
           path: assert-ai-baseline
-      - uses: responsibleai/assert-ai-action@v1
+      - uses: responsibleai/assert-action@v1
         with:
           config: eval/eval_config.yaml
           baseline: assert-ai-baseline
@@ -94,7 +94,7 @@ Baselines are normal GitHub Actions artifacts from trusted runs on `main`. They 
 
 ## Versioning and compatibility
 
-This action pins `assert-ai==0.1.0`. Use `responsibleai/assert-ai-action@v1` for the floating major tag with compatible bug fixes, or pin an exact tag such as `@v1.0.0`.
+This action pins `assert-ai==0.1.0`. Use `responsibleai/assert-action@v1` for the floating major tag with compatible bug fixes, or pin an exact tag such as `@v1.0.0`.
 
 ## Contributing and license
 
