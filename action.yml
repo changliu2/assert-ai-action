@@ -1,13 +1,60 @@
 name: 'ASSERT safety regression gate'
-description: 'Run assert-ai evals in CI and gate pull requests on paired safety regressions.'
+description: 'Run assert-ai evals in CI and gate pull requests on paired safety regressions across one or many behaviors.'
 author: 'Microsoft Corporation'
 
+branding:
+  icon: 'shield'
+  color: 'blue'
+
 inputs:
+  configs:
+    description: >-
+      Path, glob, or newline-delimited list of assert-ai YAML eval configs
+      (for example: eval/behaviors/*.yaml). ASSERT configs are written one
+      behavior per file, so each match becomes one gated behavior.
+    required: false
+    default: ''
   config:
-    description: 'Path to the assert-ai YAML eval config (e.g. eval/eval_config.yaml).'
-    required: true
+    description: 'DEPRECATED single-config alias for `configs`. Use `configs` instead.'
+    required: false
+    default: ''
+  gate-mode:
+    description: >-
+      `regression` (default) blocks only on a statistically significant
+      regression. `improvement` passes only on a statistically significant
+      improvement in `primary-dimension` with no regression in
+      `guard-dimensions` -- use it on remediation pull requests.
+    required: false
+    default: 'regression'
+  primary-dimension:
+    description: 'Dimension that must improve under `gate-mode: improvement`.'
+    required: false
+    default: 'policy_violation'
+  guard-dimensions:
+    description: 'Comma-separated dimensions that must not regress under either gate mode.'
+    required: false
+    default: 'overrefusal'
+  alpha:
+    description: 'Family-wise significance level for the Holm-Bonferroni correction.'
+    required: false
+    default: '0.05'
   baseline:
-    description: 'Path or artifact name of the cached baseline run (scores.jsonl + test_set.jsonl). Required after the first run on main.'
+    description: 'Path or artifact name of the cached baseline run (scores.jsonl + test_set.jsonl). Required after the first run on the default branch.'
+    required: false
+    default: ''
+  assert-ai-version:
+    description: 'Version of assert-ai to install from PyPI.'
+    required: false
+    default: '0.1.0'
+  extras:
+    description: "Comma-separated assert-ai extras to install from PyPI (for example: 'regression,otel,langgraph')."
+    required: false
+    default: 'regression'
+  provider-env:
+    description: >-
+      Newline-delimited KEY=VALUE pairs exported for the eval run. Use this for
+      any LiteLLM provider (OPENAI_API_KEY, ANTHROPIC_API_KEY, AWS_*, ...).
+      Supply values from secrets; they are masked in the log.
     required: false
     default: ''
   azure-api-key:
@@ -35,13 +82,12 @@ inputs:
     required: false
     default: 'true'
   allow-inconclusive:
-    description: 'Labeling only. When false, statistically insignificant dimensions are reported as Uncertain (per-dimension) and the overall verdict becomes WARN instead of Inconclusive. The job still passes in both cases — use a separate gate (or future fail-on-inconclusive input) to fail the build on inconclusive results.'
+    description: >-
+      Labeling only. When false, statistically insignificant dimensions are
+      reported as Uncertain and the overall verdict becomes WARN instead of
+      Inconclusive. The job still passes in both cases -- see docs/verdicts.md.
     required: false
     default: 'true'
-  extras:
-    description: "Comma-separated assert-ai extras to install from PyPI (for example: 'regression,otel,langgraph')."
-    required: false
-    default: 'regression'
 
 outputs:
   gate-verdict:
@@ -53,6 +99,9 @@ outputs:
   n-paired-cases:
     description: 'Number of paired test cases used by the statistical gate.'
     value: ${{ steps.decide.outputs.n-paired-cases }}
+  behaviors-evaluated:
+    description: 'Number of behavior configs that produced a comparable run.'
+    value: ${{ steps.decide.outputs.behaviors-evaluated }}
   pr-comment-url:
     description: 'URL of the posted or updated pull request comment, if any.'
     value: ${{ steps.post-comment.outputs.pr-comment-url }}
@@ -70,39 +119,48 @@ runs:
       shell: bash
       env:
         ASSERT_AI_EXTRAS: ${{ inputs.extras }}
+        ASSERT_AI_VERSION: ${{ inputs.assert-ai-version }}
       run: |
         python -m pip install --upgrade pip
+        python -m pip install PyYAML
         if [ -n "$ASSERT_AI_EXTRAS" ]; then
-          python -m pip install "assert-ai[${ASSERT_AI_EXTRAS}]==0.1.0"
+          python -m pip install "assert-ai[${ASSERT_AI_EXTRAS}]==${ASSERT_AI_VERSION}"
         else
-          python -m pip install "assert-ai==0.1.0"
+          python -m pip install "assert-ai==${ASSERT_AI_VERSION}"
         fi
 
-    - name: Freeze the eval config for CI
+    - name: Resolve config input
+      id: configs
       shell: bash
+      env:
+        CONFIGS: ${{ inputs.configs }}
+        LEGACY_CONFIG: ${{ inputs.config }}
       run: |
-        python <<'PY'
-        import os
-        from pathlib import Path
+        if [ -n "$CONFIGS" ]; then
+          selected="$CONFIGS"
+        elif [ -n "$LEGACY_CONFIG" ]; then
+          echo "::warning::'config' is deprecated; use 'configs', which accepts a glob or a newline-delimited list."
+          selected="$LEGACY_CONFIG"
+        else
+          echo "::error::one of 'configs' or 'config' is required"
+          exit 1
+        fi
+        {
+          echo "selected<<__ASSERT_EOF__"
+          echo "$selected"
+          echo "__ASSERT_EOF__"
+        } >> "$GITHUB_OUTPUT"
 
-        import yaml
-
-        source = Path("${{ inputs.config }}")
-        if not source.is_file():
-            raise SystemExit(f"config not found: {source}")
-
-        with source.open("r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-
-        cfg["artifacts_root"] = os.path.join(os.environ["GITHUB_WORKSPACE"], "assert-ai-artifacts")
-
-        frozen = Path("assert-ai.frozen.yaml")
-        with frozen.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(cfg, f, sort_keys=False)
-
-        print(f"frozen config: {frozen}")
-        print(f"artifacts_root: {cfg['artifacts_root']}")
-        PY
+    - name: Plan behaviors
+      id: plan
+      shell: bash
+      env:
+        SELECTED_CONFIGS: ${{ steps.configs.outputs.selected }}
+      run: |
+        python "${{ github.action_path }}/scripts/plan_behaviors.py" plan \
+          --configs "$SELECTED_CONFIGS" \
+          --artifacts-root "$GITHUB_WORKSPACE/assert-ai-artifacts" \
+          --out assert-ai-behaviors.json
 
     - name: Resolve baseline input
       id: resolve-baseline
@@ -134,84 +192,94 @@ runs:
         name: ${{ steps.resolve-baseline.outputs.artifact-name }}
         path: assert-ai-baseline
 
-    - name: Check baseline contents
-      id: baseline
+    - name: Export provider credentials
       shell: bash
+      env:
+        PROVIDER_ENV: ${{ inputs.provider-env }}
+        AZURE_API_KEY_IN: ${{ inputs.azure-api-key }}
+        AZURE_API_BASE_IN: ${{ inputs.azure-api-base }}
+        AZURE_API_VERSION_IN: ${{ inputs.azure-api-version }}
       run: |
-        root="${{ steps.resolve-baseline.outputs.baseline-root }}"
-        if [ -z "$root" ] || [ ! -e "$root" ]; then
-          echo "baseline-available=false" >> "$GITHUB_OUTPUT"
-          echo "baseline-root=$root" >> "$GITHUB_OUTPUT"
-          echo "baseline-reason=no baseline path or artifact was available" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        scores="$(find "$root" -name scores.jsonl -type f | sort | head -n 1 || true)"
-        test_set="$(find "$root" -name test_set.jsonl -type f | sort | head -n 1 || true)"
-        if [ -z "$scores" ] || [ -z "$test_set" ]; then
-          echo "baseline-available=false" >> "$GITHUB_OUTPUT"
-          echo "baseline-root=$root" >> "$GITHUB_OUTPUT"
-          echo "baseline-reason=baseline is missing scores.jsonl or test_set.jsonl" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-
-        echo "baseline-available=true" >> "$GITHUB_OUTPUT"
-        echo "baseline-root=$root" >> "$GITHUB_OUTPUT"
-        echo "baseline-scores=$scores" >> "$GITHUB_OUTPUT"
-        echo "baseline-test-set=$test_set" >> "$GITHUB_OUTPUT"
+        # Mask before writing to GITHUB_ENV so a downstream `set -x` or a
+        # crashing provider SDK cannot echo a live key into the log.
+        emit() {
+          key="$1"
+          value="$2"
+          if [ -z "$value" ]; then return 0; fi
+          echo "::add-mask::$value"
+          printf '%s=%s\n' "$key" "$value" >> "$GITHUB_ENV"
+        }
+        emit AZURE_API_KEY "$AZURE_API_KEY_IN"
+        emit AZURE_API_BASE "$AZURE_API_BASE_IN"
+        emit AZURE_API_VERSION "$AZURE_API_VERSION_IN"
+        while IFS= read -r line; do
+          case "$line" in
+            ''|\#*) continue ;;
+          esac
+          case "$line" in
+            *=*) ;;
+            *) continue ;;
+          esac
+          key="${line%%=*}"
+          value="${line#*=}"
+          key="$(printf '%s' "$key" | tr -d '[:space:]')"
+          if [ -n "$key" ]; then emit "$key" "$value"; fi
+        done <<< "$PROVIDER_ENV"
 
     - name: Run assert-ai
       shell: bash
-      env:
-        AZURE_API_KEY: ${{ inputs.azure-api-key }}
-        AZURE_API_BASE: ${{ inputs.azure-api-base }}
-        AZURE_API_VERSION: ${{ inputs.azure-api-version }}
       run: |
-        assert-ai run --config assert-ai.frozen.yaml
+        set -euo pipefail
+        python -c "import json;[print(e['frozen']) for e in json.load(open('assert-ai-behaviors.json',encoding='utf-8'))]" > .assert-ai-frozen-list
+        while IFS= read -r frozen; do
+          if [ -z "$frozen" ]; then continue; fi
+          echo "::group::assert-ai run --config $frozen"
+          assert-ai run --config "$frozen"
+          echo "::endgroup::"
+        done < .assert-ai-frozen-list
 
-    - name: Locate current run
-      id: locate-current
+    - name: Locate runs
+      id: locate
       shell: bash
       run: |
-        scores="$(find "$GITHUB_WORKSPACE/assert-ai-artifacts" -name scores.jsonl -type f | sort | tail -n 1 || true)"
-        if [ -z "$scores" ]; then
-          echo "::error::No scores.jsonl produced by assert-ai."
-          exit 1
-        fi
-        run_dir="$(dirname "$scores")"
-        echo "current-run-root=$run_dir" >> "$GITHUB_OUTPUT"
-        echo "scores-path=$scores" >> "$GITHUB_OUTPUT"
-        echo "current run: $run_dir"
+        python "${{ github.action_path }}/scripts/plan_behaviors.py" resolve \
+          --manifest assert-ai-behaviors.json \
+          --baseline-root "${{ steps.resolve-baseline.outputs.baseline-root }}" \
+          --out assert-ai-comparable.json \
+          --all-out assert-ai-resolved.json
 
     - name: Write FirstRun report
-      if: ${{ steps.baseline.outputs.baseline-available != 'true' }}
+      if: ${{ steps.locate.outputs.baseline-available != 'true' }}
       shell: bash
       run: |
         python "${{ github.action_path }}/scripts/write_firstrun_report.py" \
-          --current-run-root "${{ steps.locate-current.outputs.current-run-root }}" \
-          --baseline-reason "${{ steps.baseline.outputs.baseline-reason }}" \
+          --current-run-root "${{ steps.locate.outputs.first-current }}" \
+          --baseline-reason "no baseline run was available for any behavior" \
           --out gate_report.json \
           --pr-comment pr_comment.md
 
     - name: Detect test-set drift
       id: drift
-      if: ${{ steps.baseline.outputs.baseline-available == 'true' }}
+      if: ${{ steps.locate.outputs.baseline-available == 'true' }}
       shell: bash
       run: |
         python "${{ github.action_path }}/scripts/detect_test_set_drift.py" \
-          --baseline-root "${{ steps.baseline.outputs.baseline-root }}" \
-          --current-run-root "${{ steps.locate-current.outputs.current-run-root }}" \
+          --baseline-root "${{ steps.resolve-baseline.outputs.baseline-root }}" \
+          --current-run-root "${{ steps.locate.outputs.first-current }}" \
           --artifacts-root "${{ github.workspace }}/assert-ai-artifacts" \
           --out gate_report.json \
           --pr-comment pr_comment.md
 
     - name: Run the paired gate
-      if: ${{ steps.baseline.outputs.baseline-available == 'true' && steps.drift.outputs.skip-compare != 'true' }}
+      if: ${{ steps.locate.outputs.baseline-available == 'true' && steps.drift.outputs.skip-compare != 'true' }}
       shell: bash
       run: |
         python "${{ github.action_path }}/scripts/compare_runs.py" \
-          --baseline "${{ steps.baseline.outputs.baseline-root }}" \
-          --current "${{ steps.locate-current.outputs.current-run-root }}" \
+          --behaviors assert-ai-comparable.json \
+          --gate-mode "${{ inputs.gate-mode }}" \
+          --primary-dimension "${{ inputs.primary-dimension }}" \
+          --guard-dimensions "${{ inputs.guard-dimensions }}" \
+          --alpha "${{ inputs.alpha }}" \
           --out gate_report.json \
           --pr-comment pr_comment.md \
           --allow-inconclusive "${{ inputs.allow-inconclusive }}"
@@ -252,6 +320,8 @@ runs:
         path: |
           gate_report.json
           pr_comment.md
+          assert-ai-behaviors.json
+          assert-ai-resolved.json
         if-no-files-found: warn
         retention-days: 30
 
@@ -279,19 +349,19 @@ runs:
 
         report = json.loads(report_path.read_text(encoding="utf-8"))
         verdict = report.get("decision", "WARN")
-        n_pairs = str(report.get("n_paired_cases", 0))
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             print(f"gate-verdict={verdict}", file=f)
             print(f"gate-report-path={Path.cwd() / report_path}", file=f)
-            print(f"n-paired-cases={n_pairs}", file=f)
+            print(f"n-paired-cases={report.get('n_paired_cases', 0)}", file=f)
+            print(f"behaviors-evaluated={report.get('behaviors_evaluated', 0)}", file=f)
 
-        print(f"Gate verdict: {verdict}")
+        print(f"Gate verdict: {verdict} (mode: {report.get('gate_mode', 'regression')})")
         fail_on_regression = as_bool(os.environ.get("FAIL_ON_REGRESSION"), default=True)
 
         # FAIL is the only blocking verdict today. WARN (TooFewSamples, Uncertain,
         # no-overlap), Inconclusive, FirstRun, and TestSetChanged are intentional
-        # fail-open states — see docs/verdicts.md.
+        # fail-open states -- see docs/verdicts.md.
         if verdict == "FAIL" and fail_on_regression:
-            print("::error::ASSERT safety regression detected — see gate_report.json and the PR comment.")
+            print("::error::ASSERT gate failed -- see gate_report.json and the PR comment.")
             sys.exit(1)
         PY
