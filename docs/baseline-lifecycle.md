@@ -11,17 +11,32 @@ A baseline is the trusted ASSERT artifact set that PRs compare against. It must 
 Run the action on `main` after a trusted merge, then upload `assert-ai-artifacts/` as a GitHub Actions artifact named `assert-ai-baseline`.
 
 ```yaml
-- uses: responsibleai/assert-action@v1
-  with:
-    config: eval/eval_config.yaml
-    azure-api-key: ${{ secrets.AZURE_API_KEY }}
-    azure-api-base: ${{ secrets.AZURE_API_BASE }}
-    azure-api-version: ${{ secrets.AZURE_API_VERSION }}
-- uses: actions/upload-artifact@v4
-  with:
-    name: assert-ai-baseline
-    path: assert-ai-artifacts/
-    retention-days: 90
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: responsibleai/assert-action@v1
+        with:
+          configs: eval/behaviors/*.yaml
+          baseline: assert-ai-baseline
+          min-pairs: '30'
+          target-install: python -m pip install -e .
+          extras: regression,otel
+          azure-api-key: ${{ secrets.AZURE_API_KEY }}
+          azure-api-base: ${{ secrets.AZURE_API_BASE }}
+          azure-api-version: ${{ secrets.AZURE_API_VERSION }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assert-ai-baseline
+          path: assert-ai-artifacts/
+          retention-days: 90
 ```
 
 ## How baselines are refreshed
@@ -30,21 +45,30 @@ Use both `push` to `main` and a nightly `schedule`. The push path captures code 
 
 ## How PRs consume baselines
 
-Download the latest trusted baseline artifact before invoking the action, then pass the local path through `baseline`.
+Do not add a manual `actions/download-artifact` step. GitHub Actions artifacts are scoped to the run that produced them, so a PR run cannot see the default branch baseline by name. Pass the artifact name through `baseline`; the action uses `actions: read` permission to find the latest successful trusted run on `baseline-branch` and downloads the artifact itself.
 
 ```yaml
-- uses: actions/download-artifact@v4
-  continue-on-error: true
-  with:
-    name: assert-ai-baseline
-    path: assert-ai-baseline
-- uses: responsibleai/assert-action@v1
-  with:
-    config: eval/eval_config.yaml
-    baseline: assert-ai-baseline
+jobs:
+  safety:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: responsibleai/assert-action@v1
+        with:
+          configs: eval/behaviors/*.yaml
+          baseline: assert-ai-baseline
+          min-pairs: '30'
+          target-install: python -m pip install -e .
+          extras: regression,otel
 ```
 
-If no artifact is available, the action returns `FirstRun` and still uploads the current artifacts.
+If no trusted artifact is available, the action returns `FirstRun` and still uploads the current artifacts on non-PR runs.
 
 ## Test-set drift
 

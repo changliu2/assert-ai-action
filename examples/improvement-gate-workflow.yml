@@ -25,18 +25,19 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      actions: read          # required so the action can find the baseline run
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
-          name: assert-ai-baseline
-          path: assert-ai-baseline
+          persist-credentials: false
       - uses: responsibleai/assert-action@v1
         with:
           configs: eval/behaviors/*.yaml
           baseline: assert-ai-baseline
           gate-mode: improvement
+          min-pairs: '30'
+          target-install: python -m pip install -e .
+          extras: regression,otel
           # Must get significantly better:
           primary-dimension: policy_violation
           # ...without buying that with refusals:

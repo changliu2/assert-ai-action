@@ -26,10 +26,11 @@ Copilot is for *answering questions* and *synthesis* — direct answers, failure
 
 ## Preconditions (check, don't assume)
 
-1. **ASSERT installed**: verify `assert-ai --help` succeeds. If not, guide install:
+1. **ASSERT installed**: verify `assert-ai --help` succeeds. If not, guide install from PyPI, not the customer repo:
    ```
-   python -m pip install -e ".[otel,langgraph]"
+   python -m pip install "assert-ai[otel]"
    ```
+   Add route-specific extras when needed, for example `assert-ai[otel,langgraph]` for LangGraph or `assert-ai[aiohttp]` for `target.endpoint`.
 
 2. **Provider creds exist** in `.env`. NEVER read or print `.env`. If a run fails with an auth error, tell the user which variable NAMES are required (AZURE_API_KEY, AZURE_API_BASE, OPENAI_API_KEY, etc.) — never their values.
 
@@ -56,6 +57,7 @@ Copilot is for *answering questions* and *synthesis* — direct answers, failure
 Help the user set the right target in the config:
 
 - **Framework agent** (LangGraph, CrewAI, etc.) with a Python entry function: use `target.callable` WITH `target.trace` so the judge can cite tool calls and routing.
+- **HTTP endpoint** that accepts `{"message": ..., "history": [...]}` and returns `{"response": ...}`: use native `target.endpoint` (requires the `aiohttp` extra). Use a `target.callable` shim only when the service shape differs.
 - **Hosted model** with a system prompt and optional tools: use `target.model` and `target.tools`.
 - **Pre-collected traces** (no live inference needed): use `assert-ai judge-traces --traces <path> --config <path>`.
 

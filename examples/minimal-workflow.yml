@@ -1,6 +1,6 @@
 # Minimal ASSERT safety gate workflow.
 # Pattern: refresh the baseline on push to main and on a nightly cron, then have
-# pull requests download that baseline and run a fresh paired safety gate.
+# pull requests compare against the latest trusted baseline resolved by the action.
 
 name: Safety regression gate
 on:
@@ -9,32 +9,32 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '0 7 * * *'  # nightly baseline refresh — catches Azure model upgrades
+    - cron: '0 7 * * *'  # nightly baseline refresh — catches model upgrades
 jobs:
   safety:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
+      actions: read          # required so the action can find the baseline run
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - id: download-baseline
-        if: github.event_name == 'pull_request'
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: assert-ai-baseline
-          path: assert-ai-baseline
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.repository.default_branch_workflow_run_id }}  # replace with your baseline run lookup
       - uses: responsibleai/assert-action@v1
         with:
           # One behavior per YAML: every match becomes its own gated behavior.
           configs: eval/behaviors/*.yaml
           baseline: assert-ai-baseline
+          min-pairs: '30'
+          # Install the repository under test so target.callable imports work,
+          # including src/ layouts. Change this for your package manager.
+          target-install: python -m pip install -e .
+          # Use regression,otel for traced callables; add langgraph for LangGraph.
+          extras: regression,otel
           azure-api-key: ${{ secrets.AZURE_API_KEY }}
           azure-api-base: ${{ secrets.AZURE_API_BASE }}
           azure-api-version: ${{ secrets.AZURE_API_VERSION }}
