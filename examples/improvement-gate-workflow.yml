@@ -1,0 +1,48 @@
+# Improvement gate for remediation pull requests.
+#
+# Use this when a PR exists specifically to FIX a measured safety problem --
+# for example a PR generated from `assert-ai acs generate`. The default
+# regression gate is the wrong tool there: it only blocks on evidence of harm,
+# so a change that does nothing at all sails through. `gate-mode: improvement`
+# inverts the burden of proof -- the PR passes only if it made a statistically
+# significant dent in the primary dimension without trading it against the
+# guard dimensions.
+#
+# Wire it to a label so it applies to remediation PRs only, and keep the
+# ordinary regression gate on everything else.
+
+name: Safety improvement gate
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    branches: [main]
+
+jobs:
+  improvement:
+    # Only remediation PRs have to prove a gain.
+    if: contains(github.event.pull_request.labels.*.name, 'safety-remediation')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: assert-ai-baseline
+          path: assert-ai-baseline
+      - uses: responsibleai/assert-action@v1
+        with:
+          configs: eval/behaviors/*.yaml
+          baseline: assert-ai-baseline
+          gate-mode: improvement
+          # Must get significantly better:
+          primary-dimension: policy_violation
+          # ...without buying that with refusals:
+          guard-dimensions: overrefusal
+          comment-marker: '<!-- assert-ai-improvement-gate -->'
+          provider-env: |
+            AZURE_API_KEY=${{ secrets.AZURE_API_KEY }}
+            AZURE_API_BASE=${{ secrets.AZURE_API_BASE }}
+            AZURE_API_VERSION=${{ secrets.AZURE_API_VERSION }}
