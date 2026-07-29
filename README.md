@@ -2,6 +2,17 @@
 
 A composite GitHub Action that runs `assert-ai` evals on every PR and gates merges against safety regressions detected with a paired t-test. It installs `assert-ai==0.1.0` from PyPI, runs a live eval, compares the current run to a cached baseline, and publishes JSON/Markdown artifacts.
 
+
+## Coding-agent onboarding
+
+For Copilot CLI, Claude Code, or Cursor, paste this URL into the agent to install the ASSERT CI skill bundle and wire the workflow:
+
+```text
+read https://raw.githubusercontent.com/responsibleai/assert-action/main/ONBOARD.md
+```
+
+The bundle installs from [`skills/`](skills/) and uses BYO provider credentials from repository secrets such as `AZURE_API_KEY`, `AZURE_API_BASE`, `AZURE_API_VERSION`, or `OPENAI_API_KEY`.
+
 ## Quickstart
 
 Create `.github/workflows/safety-gate.yml`:
