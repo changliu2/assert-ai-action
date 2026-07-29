@@ -39,7 +39,16 @@ inputs:
     required: false
     default: '0.05'
   baseline:
-    description: 'Path or artifact name of the cached baseline run (scores.jsonl + test_set.jsonl). Required after the first run on the default branch.'
+    description: >-
+      Path to a baseline run directory, or the NAME of an artifact uploaded by a
+      trusted run. When an artifact name is given, the action finds the most
+      recent successful run on `baseline-branch` that still has that artifact and
+      downloads it -- artifacts are scoped to the run that produced them, so a
+      pull request cannot see the default branch's baseline without this lookup.
+    required: false
+    default: ''
+  baseline-branch:
+    description: 'Branch whose successful runs hold the trusted baseline artifact. Defaults to the repository default branch.'
     required: false
     default: ''
   assert-ai-version:
@@ -184,13 +193,27 @@ runs:
           echo "needs-download=true" >> "$GITHUB_OUTPUT"
         fi
 
-    - name: Download baseline artifact
+    - name: Find the baseline run
+      id: baseline-run
       if: ${{ steps.resolve-baseline.outputs.needs-download == 'true' }}
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: |
+        python "${{ github.action_path }}/scripts/find_baseline_run.py" \
+          --artifact-name "${{ steps.resolve-baseline.outputs.artifact-name }}" \
+          --branch "${{ inputs.baseline-branch != '' && inputs.baseline-branch || github.event.repository.default_branch }}"
+
+    - name: Download baseline artifact
+      if: ${{ steps.resolve-baseline.outputs.needs-download == 'true' && steps.baseline-run.outputs.found == 'true' }}
       uses: actions/download-artifact@v4
       continue-on-error: true
       with:
         name: ${{ steps.resolve-baseline.outputs.artifact-name }}
         path: assert-ai-baseline
+        run-id: ${{ steps.baseline-run.outputs.run-id }}
+        github-token: ${{ github.token }}
 
     - name: Export provider credentials
       shell: bash

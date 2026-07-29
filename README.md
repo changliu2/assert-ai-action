@@ -1,6 +1,8 @@
 # ASSERT safety regression gate
 
-A composite GitHub Action that runs `assert-ai` evals on every PR and gates merges against safety regressions detected with a paired t-test. It installs `assert-ai==0.1.0` from PyPI, runs a live eval, compares the current run to a cached baseline, and publishes JSON/Markdown artifacts.
+A composite GitHub Action that runs `assert-ai` evals on every PR and gates merges against safety regressions detected with a paired t-test. It installs `assert-ai` from PyPI, runs a live eval for each behavior, compares the current runs to a cached baseline, and publishes JSON/Markdown artifacts.
+
+ASSERT configs are written **one behavior per YAML**, so the gate takes a glob and evaluates each behavior independently — while correcting for multiple comparisons across the whole set.
 
 
 ## Coding-agent onboarding
@@ -33,25 +35,17 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      actions: read          # required so the action can find the baseline run
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - id: download-baseline
-        if: github.event_name == 'pull_request'
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: assert-ai-baseline
-          path: assert-ai-baseline
       - uses: responsibleai/assert-action@v1
         with:
-          config: eval/eval_config.yaml
+          configs: eval/behaviors/*.yaml
           baseline: assert-ai-baseline
-          azure-api-key: ${{ secrets.AZURE_API_KEY }}
-          azure-api-base: ${{ secrets.AZURE_API_BASE }}
-          azure-api-version: ${{ secrets.AZURE_API_VERSION }}
+          provider-env: |
+            AZURE_API_KEY=${{ secrets.AZURE_API_KEY }}
+            AZURE_API_BASE=${{ secrets.AZURE_API_BASE }}
+            AZURE_API_VERSION=${{ secrets.AZURE_API_VERSION }}
       - if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
@@ -60,14 +54,27 @@ jobs:
           retention-days: 90
 ```
 
-First run on `main` creates the baseline artifact. PR runs download that baseline and compare paired `test_case_id` rows.
+First run on `main` creates the baseline artifact. PR runs locate that baseline and compare paired `test_case_id` rows.
+
+You do **not** need a `download-artifact` step. Artifacts are scoped to the run that produced them, so a PR cannot see the default branch's baseline on its own; the action resolves the most recent successful run on the default branch that still holds the artifact and downloads it for you. That needs `actions: read`. Point `baseline` at a directory instead if you prefer to commit baselines to the repo.
 
 ## Inputs
 
 | Input | Required | Default | Description |
 |---|---:|---|---|
-| `config` | yes | — | Path to the `assert-ai` YAML eval config. |
-| `baseline` | no | `''` | Path or artifact name for a cached baseline containing `scores.jsonl` and `test_set.jsonl`. |
+| `configs` | yes\* | — | Path, glob, or newline-delimited list of `assert-ai` YAML eval configs. One behavior per file. |
+| `config` | no | `''` | **Deprecated** single-config alias for `configs`. |
+| `gate-mode` | no | `regression` | `regression` blocks on significant regressions; `improvement` passes only on a significant gain. See [Gate modes](#gate-modes). |
+| `primary-dimension` | no | `policy_violation` | Dimension that must improve under `gate-mode: improvement`. |
+| `guard-dimensions` | no | `overrefusal` | Comma-separated dimensions that must not regress. |
+| `alpha` | no | `0.05` | Family-wise significance level for the Holm-Bonferroni correction. |
+| `baseline` | no | `''` | Path to a baseline run directory, or the **name** of an artifact from a trusted run. |
+| `baseline-branch` | no | `''` | Branch whose successful runs hold the baseline artifact. Defaults to the repo default branch. |
+| `assert-ai-version` | no | `0.1.0` | Version of `assert-ai` to install from PyPI. |
+| `provider-env` | no | `''` | Newline-delimited `KEY=VALUE` pairs for any LiteLLM provider. Values are masked. |
+| `azure-api-key` | no | `''` | Exposed as `AZURE_API_KEY` during the eval. |
+| `azure-api-base` | no | `''` | Exposed as `AZURE_API_BASE` during the eval. |
+| `azure-api-version` | no | `''` | Exposed as `AZURE_API_VERSION` during the eval. |
 | `azure-api-key` | no | `''` | Exposed as `AZURE_API_KEY` during the eval. |
 | `azure-api-base` | no | `''` | Exposed as `AZURE_API_BASE` during the eval. |
 | `azure-api-version` | no | `''` | Exposed as `AZURE_API_VERSION` during the eval. |
@@ -84,7 +91,25 @@ First run on `main` creates the baseline artifact. PR runs download that baselin
 | `gate-verdict` | `PASS`, `WARN`, `FAIL`, `FirstRun`, `TestSetChanged`, or `Inconclusive`. |
 | `gate-report-path` | Path to `gate_report.json`. |
 | `n-paired-cases` | Number of paired cases used by the t-test. |
+| `behaviors-evaluated` | Number of behavior configs that produced a comparable run. |
 | `pr-comment-url` | URL of the posted or updated PR comment, if posted. |
+
+## Gate modes
+
+The default gate blocks only on evidence of harm. That is the right default for ordinary pull requests, but it is the wrong tool for a PR whose entire purpose is to *fix* a measured safety problem — under a regression gate, a remediation that does nothing at all passes.
+
+| Mode | Passes when |
+|---|---|
+| `regression` (default) | No `(behavior × dimension)` regressed significantly. |
+| `improvement` | `primary-dimension` improved significantly in at least one behavior **and** no `guard-dimensions` regressed. |
+
+The asymmetry is deliberate: under `regression` a change that merely trends worse is not blocked; under `improvement` a change that merely trends better does not pass. See [`examples/improvement-gate-workflow.yml`](examples/improvement-gate-workflow.yml).
+
+## Multiple behaviors and multiple comparisons
+
+Every matched config is one behavior, run and paired independently. The Holm-Bonferroni step-down correction is then applied across the **whole `(behavior × dimension)` family** rather than per behavior — correcting each behavior separately would quietly inflate the family-wise false-positive rate as behaviors are added. The PR comment states the correction and the family size.
+
+Each behavior also gets its own `artifacts_root`, and baselines are matched to their own suite, so adding a second behavior cannot cause the gate to compare a suite against itself.
 
 ## Verdicts
 
@@ -92,7 +117,7 @@ First run on `main` creates the baseline artifact. PR runs download that baselin
 |---|---|
 | `PASS` | No safety regression; at least one dimension improved or all checks are clean. |
 | `WARN` | The gate needs attention but does not block by default. |
-| `FAIL` | A paired dimension regressed significantly. |
+| `FAIL` | A paired dimension regressed significantly (or, in `improvement` mode, failed to improve). |
 | `FirstRun` | No baseline exists yet. |
 | `TestSetChanged` | The current `test_set.jsonl` does not match the baseline. |
 | `Inconclusive` | The paired test found no statistically significant movement. |
@@ -101,11 +126,11 @@ See [`docs/verdicts.md`](docs/verdicts.md) for details.
 
 ## Baseline lifecycle
 
-Baselines are normal GitHub Actions artifacts from trusted runs on `main`. They contain `scores.jsonl`, `test_set.jsonl`, and supporting ASSERT artifacts. PRs compare against the latest trusted baseline; scheduled runs refresh it to catch model or dependency changes. See [`docs/baseline-lifecycle.md`](docs/baseline-lifecycle.md).
+Baselines are normal GitHub Actions artifacts from trusted runs on the default branch. They contain `scores.jsonl`, `test_set.jsonl`, and supporting ASSERT artifacts. PRs compare against the latest trusted baseline; scheduled runs refresh it to catch model or dependency changes. See [`docs/baseline-lifecycle.md`](docs/baseline-lifecycle.md).
 
 ## Versioning and compatibility
 
-This action pins `assert-ai==0.1.0`. Use `responsibleai/assert-action@v1` for the floating major tag with compatible bug fixes, or pin an exact tag such as `@v1.0.0`.
+`assert-ai-version` defaults to `0.1.0`; override it to move independently of the action. Use `responsibleai/assert-action@v1` for the floating major tag with compatible bug fixes, or pin an exact tag such as `@v1.0.0`.
 
 ## Contributing and license
 
