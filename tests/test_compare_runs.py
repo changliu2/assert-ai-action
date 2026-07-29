@@ -2,7 +2,6 @@ import importlib.util
 import json
 from itertools import count
 from pathlib import Path
-from types import SimpleNamespace
 
 
 _MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "compare_runs.py"
@@ -84,11 +83,15 @@ def test_compare_applies_holm_stepdown_to_dimension_verdicts(tmp_path, monkeypat
     )
     calls = count(1)
 
-    def fake_ttest(cur_vec, base_vec):
+    def fake_paired_binary_test(*, b_safe_to_violation, c_violation_to_safe):
         call_number = next(calls)
-        return SimpleNamespace(statistic=1.0, pvalue=0.03 if call_number == 1 else 0.04)
+        return {
+            "statistic": 1.0,
+            "p_value": 0.03 if call_number == 1 else 0.04,
+            "method": "mcnemar-exact-binomial",
+        }
 
-    monkeypatch.setattr(compare_runs.stats, "ttest_rel", fake_ttest)
+    monkeypatch.setattr(compare_runs, "_paired_binary_test", fake_paired_binary_test)
 
     report = compare_runs.compare(baseline, current)
 
@@ -257,3 +260,129 @@ def test_render_markdown_multi_behavior_reports_family_and_mode(tmp_path) -> Non
     assert "Improvement gate" in md
     assert "Holm-Bonferroni across 1 tests" in md
     assert "`leakage`" in md
+
+
+def test_exact_mcnemar_counterexample_does_not_regress(tmp_path) -> None:
+    # Customer-review counterexample: 4 safe→violation moves among 30 pairs.
+    # The old paired t-test reports p≈0.0434; exact two-sided McNemar is 0.125
+    # (directional exact p=0.0625), so a regression gate must not fail the PR.
+    base = {f"case-{i}": {"policy_violation": False} for i in range(30)}
+    cur = {
+        f"case-{i}": {"policy_violation": i < 4}
+        for i in range(30)
+    }
+    _write_scores(tmp_path / "base", base)
+    _write_scores(tmp_path / "cur", cur)
+
+    report = compare_runs.compare(tmp_path / "base", tmp_path / "cur")
+    dim = report["dimensions"][0]
+
+    assert dim["discordant_b"] == 4
+    assert dim["discordant_c"] == 0
+    assert dim["n_discordant"] == 4
+    assert dim["p_value"] == 0.125
+    assert dim["verdict"] == "Inconclusive"
+    assert report["decision"] == "Inconclusive"
+
+
+def test_perfect_separation_serializes_as_strict_json(tmp_path) -> None:
+    base = {f"case-{i}": {"policy_violation": False} for i in range(30)}
+    cur = {f"case-{i}": {"policy_violation": True} for i in range(30)}
+    _write_scores(tmp_path / "base", base)
+    _write_scores(tmp_path / "cur", cur)
+
+    report = compare_runs.compare(tmp_path / "base", tmp_path / "cur")
+    text = json.dumps(compare_runs._json_safe(report), allow_nan=False)
+
+    assert "Infinity" not in text
+    assert "NaN" not in text
+    json.loads(
+        text,
+        parse_constant=lambda constant: (_ for _ in ()).throw(
+            AssertionError(f"non-standard JSON constant {constant}")
+        ),
+    )
+
+
+def test_many_pairs_too_few_discordant_pairs_is_too_few_samples(tmp_path) -> None:
+    base = {f"case-{i}": {"policy_violation": False} for i in range(500)}
+    cur = {
+        f"case-{i}": {"policy_violation": i == 0}
+        for i in range(500)
+    }
+    _write_scores(tmp_path / "base", base)
+    _write_scores(tmp_path / "cur", cur)
+
+    report = compare_runs.compare(tmp_path / "base", tmp_path / "cur")
+    dim = report["dimensions"][0]
+
+    assert dim["n_pairs"] == 500
+    assert dim["n_discordant"] == 1
+    assert dim["verdict"] == "TooFewSamples"
+
+
+def test_mcnemar_counterexample_is_symmetric_for_improvement(tmp_path) -> None:
+    base = {
+        f"case-{i}": {"policy_violation": i < 4}
+        for i in range(30)
+    }
+    cur = {f"case-{i}": {"policy_violation": False} for i in range(30)}
+    _write_scores(tmp_path / "base", base)
+    _write_scores(tmp_path / "cur", cur)
+
+    report = compare_runs.compare(
+        tmp_path / "base", tmp_path / "cur", gate_mode="improvement"
+    )
+    dim = report["dimensions"][0]
+
+    assert dim["discordant_b"] == 0
+    assert dim["discordant_c"] == 4
+    assert dim["p_value"] == 0.125
+    assert dim["delta_pp"] == -4 / 30 * 100
+    assert dim["verdict"] == "Inconclusive"
+    assert report["decision"] == "FAIL"
+
+
+def test_large_unambiguous_effects_still_fire_both_directions(tmp_path) -> None:
+    regression_base = {f"case-{i}": {"policy_violation": False} for i in range(30)}
+    regression_cur = {
+        f"case-{i}": {"policy_violation": i < 10}
+        for i in range(30)
+    }
+    _write_scores(tmp_path / "reg_base", regression_base)
+    _write_scores(tmp_path / "reg_cur", regression_cur)
+
+    regression = compare_runs.compare(tmp_path / "reg_base", tmp_path / "reg_cur")
+
+    improvement_base = {
+        f"case-{i}": {"policy_violation": i < 10}
+        for i in range(30)
+    }
+    improvement_cur = {f"case-{i}": {"policy_violation": False} for i in range(30)}
+    _write_scores(tmp_path / "imp_base", improvement_base)
+    _write_scores(tmp_path / "imp_cur", improvement_cur)
+
+    improvement = compare_runs.compare(
+        tmp_path / "imp_base", tmp_path / "imp_cur", gate_mode="improvement"
+    )
+
+    assert regression["dimensions"][0]["verdict"] == "Regressed"
+    assert regression["decision"] == "FAIL"
+    assert improvement["dimensions"][0]["verdict"] == "Improved"
+    assert improvement["decision"] == "PASS"
+
+
+def test_zero_discordant_pairs_is_json_safe_and_does_not_raise(tmp_path) -> None:
+    base = {f"case-{i}": {"policy_violation": False} for i in range(30)}
+    cur = {f"case-{i}": {"policy_violation": False} for i in range(30)}
+    _write_scores(tmp_path / "base", base)
+    _write_scores(tmp_path / "cur", cur)
+
+    report = compare_runs.compare(tmp_path / "base", tmp_path / "cur")
+    dim = report["dimensions"][0]
+
+    assert dim["n_discordant"] == 0
+    assert dim["p_value"] == 1.0
+    assert dim["paired_risk_difference"] == 0.0
+    assert dim["verdict"] == "TooFewSamples"
+    json.dumps(compare_runs._json_safe(report), allow_nan=False)

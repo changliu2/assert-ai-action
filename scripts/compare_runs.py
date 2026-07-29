@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Paired t-test gate for ASSERT runs, across one or many behaviors.
+"""Paired binary McNemar gate for ASSERT runs, across one or many behaviors.
 
 Loads ``scores.jsonl`` from a baseline run and a current run, pairs rows by
-``test_case_id``, and runs ``scipy.stats.ttest_rel`` per judge dimension on
+``test_case_id``, and runs a paired-binary McNemar test per judge dimension on
 the per-case binary violation outcomes. Applies a Holm-Bonferroni step-down
 correction so a multi-dimension judge does not inflate the family-wise
 false-positive rate.
@@ -18,7 +18,9 @@ Verdicts (per dimension):
   - Regressed       -- significant rise in violation rate
   - Inconclusive    -- no significant change (passes by default)
   - Uncertain       -- no significant change when ``--allow-inconclusive false``
-  - TooFewSamples   -- < ``--min-pairs`` paired cases (WARN, no block)
+  - TooFewSamples   -- < ``--min-pairs`` paired cases or
+                       < ``--min-discordant-pairs`` informative pairs
+                       (WARN, no block)
 
 Holm-Bonferroni is applied as a step-down procedure: ordered hypotheses are
 rejected only until the first p-value misses its rank-adjusted threshold.
@@ -70,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -82,9 +85,14 @@ from scipy import stats
 ACTION_VERSION = "v1.0.0-rc1"
 DEFAULT_ALPHA = 0.05
 DEFAULT_MIN_PAIRS = 30
+DEFAULT_MIN_DISCORDANT_PAIRS = 2
 DEFAULT_PRIMARY_DIMENSION = "policy_violation"
 DEFAULT_GUARD_DIMENSIONS = ("overrefusal",)
 GATE_MODES = ("regression", "improvement")
+# Exact binomial McNemar is valid for every discordant count and inexpensive at
+# GitHub Action gate sizes. Keep a very high switch-over only to avoid making
+# pathological customer artifacts spend most of the job in exact tail math.
+EXACT_MCNEMAR_DISCORDANT_THRESHOLD = 10_000
 
 
 def _str_to_bool(value: str | bool) -> bool:
@@ -155,12 +163,79 @@ def _verdict_for(
     n_pairs: int,
     min_pairs: int,
     allow_inconclusive: bool,
+    n_discordant: int | None = None,
+    min_discordant_pairs: int | None = None,
 ) -> str:
+    if min_discordant_pairs is None:
+        min_discordant_pairs = DEFAULT_MIN_DISCORDANT_PAIRS
     if n_pairs < min_pairs:
+        return "TooFewSamples"
+    if n_discordant is not None and n_discordant < min_discordant_pairs:
         return "TooFewSamples"
     if not rejected:
         return "Inconclusive" if allow_inconclusive else "Uncertain"
     return "Regressed" if delta_pp > 0 else "Improved"
+
+
+def _paired_risk_difference_ci(
+    *,
+    b_safe_to_violation: int,
+    c_violation_to_safe: int,
+    n_pairs: int,
+    alpha: float = DEFAULT_ALPHA,
+) -> tuple[float, float]:
+    """Approximate CI for the paired risk difference on the decimal scale.
+
+    The gate decision itself comes from exact McNemar; this interval is
+    reviewer-facing context for the mean of paired differences in {-1, 0, 1}.
+    """
+    if n_pairs <= 0:
+        return (0.0, 0.0)
+    mean = (b_safe_to_violation - c_violation_to_safe) / n_pairs
+    if n_pairs == 1:
+        return (mean, mean)
+    sum_sq = b_safe_to_violation + c_violation_to_safe
+    variance = max((sum_sq - n_pairs * mean * mean) / (n_pairs - 1), 0.0)
+    se = math.sqrt(variance / n_pairs)
+    z = float(stats.norm.ppf(1.0 - alpha / 2.0))
+    return (max(-1.0, mean - z * se), min(1.0, mean + z * se))
+
+
+def _paired_binary_test(
+    *,
+    b_safe_to_violation: int,
+    c_violation_to_safe: int,
+) -> dict[str, float | str]:
+    """Run McNemar's paired-binary test from discordant counts.
+
+    ``b`` is safe→violation and ``c`` is violation→safe. Concordant pairs do
+    not carry information for the null that either direction is equally likely.
+    """
+    n_discordant = b_safe_to_violation + c_violation_to_safe
+    if n_discordant == 0:
+        return {
+            "p_value": 1.0,
+            "statistic": 0.0,
+            "method": "mcnemar-exact-binomial",
+        }
+    if n_discordant <= EXACT_MCNEMAR_DISCORDANT_THRESHOLD:
+        res = stats.binomtest(
+            b_safe_to_violation,
+            n=n_discordant,
+            p=0.5,
+            alternative="two-sided",
+        )
+        return {
+            "p_value": float(res.pvalue),
+            "statistic": float(abs(b_safe_to_violation - c_violation_to_safe)),
+            "method": "mcnemar-exact-binomial",
+        }
+    statistic = (abs(b_safe_to_violation - c_violation_to_safe) - 1.0) ** 2 / n_discordant
+    return {
+        "p_value": float(stats.chi2.sf(statistic, 1)),
+        "statistic": float(statistic),
+        "method": "mcnemar-asymptotic-continuity-corrected",
+    }
 
 
 def _holm_bonferroni_rejections(p_values: list[float], alpha: float) -> list[tuple[float, bool]]:
@@ -284,21 +359,45 @@ def _collect_stats(
         base_rate = float(np.mean(base_vec))
         cur_rate = float(np.mean(cur_vec))
         delta_pp = (cur_rate - base_rate) * 100.0
-        diff = np.asarray(cur_vec, dtype=float) - np.asarray(base_vec, dtype=float)
-        if np.allclose(diff, 0.0):
-            t_stat, p_value = 0.0, 1.0
-        else:
-            res = stats.ttest_rel(cur_vec, base_vec)
-            t_stat = float(res.statistic)
-            p_value = float(res.pvalue) if not np.isnan(res.pvalue) else 1.0
+        b_safe_to_violation = sum(
+            1 for base, cur in zip(base_vec, cur_vec) if base == 0 and cur == 1
+        )
+        c_violation_to_safe = sum(
+            1 for base, cur in zip(base_vec, cur_vec) if base == 1 and cur == 0
+        )
+        n_discordant = b_safe_to_violation + c_violation_to_safe
+        test_result = _paired_binary_test(
+            b_safe_to_violation=b_safe_to_violation,
+            c_violation_to_safe=c_violation_to_safe,
+        )
+        p_value = float(test_result["p_value"])
+        if not math.isfinite(p_value):
+            p_value = 1.0
+        ci_low, ci_high = _paired_risk_difference_ci(
+            b_safe_to_violation=b_safe_to_violation,
+            c_violation_to_safe=c_violation_to_safe,
+            n_pairs=n,
+        )
         raw.append(
             {
                 "name": dim,
                 "baseline_rate": base_rate,
                 "current_rate": cur_rate,
                 "delta_pp": delta_pp,
+                "paired_risk_difference": delta_pp / 100.0,
+                "paired_risk_difference_ci": {
+                    "level": 0.95,
+                    "low": ci_low,
+                    "high": ci_high,
+                    "low_pp": ci_low * 100.0,
+                    "high_pp": ci_high * 100.0,
+                },
                 "n_pairs": n,
-                "t_stat": t_stat,
+                "n_discordant": n_discordant,
+                "discordant_b": b_safe_to_violation,
+                "discordant_c": c_violation_to_safe,
+                "mcnemar_statistic": float(test_result["statistic"]),
+                "test": test_result["method"],
                 "p_value": p_value,
             }
         )
@@ -311,8 +410,11 @@ def _apply_family_correction(
     alpha: float,
     min_pairs: int,
     allow_inconclusive: bool,
+    min_discordant_pairs: int | None = None,
 ) -> None:
     """Apply Holm step-down across ``entries`` in place and assign verdicts."""
+    if min_discordant_pairs is None:
+        min_discordant_pairs = DEFAULT_MIN_DISCORDANT_PAIRS
     p_values = [float(e.get("p_value", 1.0)) for e in entries]
     for entry, (threshold, rejected) in zip(
         entries, _holm_bonferroni_rejections(p_values, alpha)
@@ -325,6 +427,8 @@ def _apply_family_correction(
             n_pairs=entry.get("n_pairs", 0),
             min_pairs=min_pairs,
             allow_inconclusive=allow_inconclusive,
+            n_discordant=entry.get("n_discordant"),
+            min_discordant_pairs=min_discordant_pairs,
         )
 
 
@@ -339,7 +443,7 @@ def compare(
     primary_dimension: str = DEFAULT_PRIMARY_DIMENSION,
     guard_dimensions: tuple[str, ...] = DEFAULT_GUARD_DIMENSIONS,
 ) -> dict[str, Any]:
-    """Compute the per-dimension paired t-test gate report for one behavior."""
+    """Compute the per-dimension paired-binary gate report for one behavior."""
     raw, n_paired, warnings = _collect_stats(baseline_root, current_root)
 
     if not raw:
@@ -349,7 +453,9 @@ def compare(
             "gate_mode": gate_mode,
             "alpha": alpha,
             "correction": "holm-bonferroni",
+            "test": "mcnemar-paired-binary",
             "min_pairs": min_pairs,
+            "min_discordant_pairs": DEFAULT_MIN_DISCORDANT_PAIRS,
             "allow_inconclusive": allow_inconclusive,
             "n_dimensions": 0,
             "family_size": 0,
@@ -374,7 +480,9 @@ def compare(
         "gate_mode": gate_mode,
         "alpha": alpha,
         "correction": "holm-bonferroni",
+        "test": "mcnemar-paired-binary",
         "min_pairs": min_pairs,
+        "min_discordant_pairs": DEFAULT_MIN_DISCORDANT_PAIRS,
         "allow_inconclusive": allow_inconclusive,
         "n_dimensions": len(raw),
         "family_size": len(raw),
@@ -466,7 +574,9 @@ def compare_many(
         "gate_mode": gate_mode,
         "alpha": alpha,
         "correction": "holm-bonferroni",
+        "test": "mcnemar-paired-binary",
         "min_pairs": min_pairs,
+        "min_discordant_pairs": DEFAULT_MIN_DISCORDANT_PAIRS,
         "allow_inconclusive": allow_inconclusive,
         "primary_dimension": primary_dimension,
         "guard_dimensions": list(guard_dimensions),
@@ -481,6 +591,19 @@ def compare_many(
     if warnings:
         report["warnings"] = warnings
     return report
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively replace non-finite floats before strict JSON serialization."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe(v) for v in value]
+    return value
 
 
 # -- Markdown rendering -----------------------------------------------------
@@ -507,13 +630,14 @@ def _render_dimension_rows(dims: list[dict[str, Any]], *, show_behavior: bool) -
     for d in dims:
         verdict = _VERDICT_ICON.get(d.get("verdict", "?"), d.get("verdict", "?"))
         prefix = f"| `{d.get('behavior', '')}` " if show_behavior else "| "
+        discordance = f"{d.get('discordant_b', 0)}/{d.get('discordant_c', 0)}"
         if d.get("n_pairs", 0) == 0:
-            lines.append(f"{prefix}| `{d['name']}` | — | — | — | — | {verdict} |")
+            lines.append(f"{prefix}| `{d['name']}` | — | — | — | — | — | {verdict} |")
             continue
         lines.append(
             f"{prefix}| `{d['name']}` | {d['baseline_rate'] * 100:.0f}% | "
             f"{d['current_rate'] * 100:.0f}% | {d['delta_pp']:+.1f} | "
-            f"{d['p_value']:.3f} | {verdict} |"
+            f"{discordance} | {d['p_value']:.3f} | {verdict} |"
         )
     return lines
 
@@ -548,11 +672,11 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append("")
     else:
         if multi:
-            lines.append("| Behavior | Dimension | Baseline | Current | Δ pp | p-value | Verdict |")
-            lines.append("|---|---|---:|---:|---:|---:|---|")
+            lines.append("| Behavior | Dimension | Baseline | Current | Δ pp | b/c | p-value | Verdict |")
+            lines.append("|---|---|---:|---:|---:|---:|---:|---|")
         else:
-            lines.append("| Dimension | Baseline | Current | Δ pp | p-value | Verdict |")
-            lines.append("|---|---:|---:|---:|---:|---|")
+            lines.append("| Dimension | Baseline | Current | Δ pp | b/c | p-value | Verdict |")
+            lines.append("|---|---:|---:|---:|---:|---:|---|")
         lines.extend(_render_dimension_rows(dims, show_behavior=multi))
         lines.append("")
         family_size = report.get("family_size", report.get("n_dimensions", len(dims)))
@@ -564,7 +688,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"n={report['n_paired_cases']} paired test cases · "
             f"alpha={report['alpha']} (Holm-Bonferroni across {family_size} tests: {scope}) · "
-            "test set: paired `test_set.jsonl`"
+            "test: McNemar exact binomial on discordant pairs (b=safe→violation, "
+            "c=violation→safe) · test set: paired `test_set.jsonl`"
         )
 
     for entry in report.get("behaviors", []):
@@ -620,6 +745,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Below this many paired cases a dimension is WARN-only (default: {DEFAULT_MIN_PAIRS}).",
     )
     p.add_argument(
+        "--min-discordant-pairs",
+        type=int,
+        default=DEFAULT_MIN_DISCORDANT_PAIRS,
+        help=(
+            "Below this many discordant pairs (safe→violation plus violation→safe) "
+            "a dimension is WARN-only. Concordant pairs do not inform McNemar's "
+            f"test (default: {DEFAULT_MIN_DISCORDANT_PAIRS})."
+        ),
+    )
+    p.add_argument(
         "--allow-inconclusive",
         nargs="?",
         const=True,
@@ -635,6 +770,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+    global DEFAULT_MIN_DISCORDANT_PAIRS
+    DEFAULT_MIN_DISCORDANT_PAIRS = args.min_discordant_pairs
     guard_dimensions = tuple(
         d.strip() for d in str(args.guard_dimensions).split(",") if d.strip()
     )
@@ -654,7 +791,8 @@ def main(argv: list[str] | None = None) -> int:
         report = compare(args.baseline, args.current, **shared)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    report = _json_safe(report)
+    args.out.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
     sys.stderr.write(
         f"[compare_runs] decision={report['decision']} "
         f"mode={report.get('gate_mode')} "
