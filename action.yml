@@ -255,6 +255,7 @@ runs:
         set -euo pipefail
         python -c "import json;[print(e['frozen']) for e in json.load(open('assert-ai-behaviors.json',encoding='utf-8'))]" > .assert-ai-frozen-list
         while IFS= read -r frozen; do
+          frozen="${frozen%$'\r'}"
           if [ -z "$frozen" ]; then continue; fi
           echo "::group::assert-ai run --config $frozen"
           assert-ai run --config "$frozen"

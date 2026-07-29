@@ -16,8 +16,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install numpy scipy pytest PyYAML
-      - name: Run helper unit tests
-        run: python -m pytest -q
+      - name: Run helper unit tests and composite-action harness
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        run: python -m pytest tests/ -q
       - name: Check the skill bundle matches the action contract
         run: python scripts/check_bundle.py
       - name: Run paired gate against fixture artifacts
