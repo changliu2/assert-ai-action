@@ -115,7 +115,9 @@ def plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def _find_run_dir(root: Path, *, prefer: str | None = None) -> Path | None:
+def _find_run_dir(
+    root: Path, *, prefer: str | None = None, require_prefer_match: bool = False
+) -> Path | None:
     """Return the run directory holding ``scores.jsonl`` under ``root``.
 
     When several exist, prefer one whose path mentions ``prefer`` (the suite
@@ -132,6 +134,8 @@ def _find_run_dir(root: Path, *, prefer: str | None = None) -> Path | None:
         matched = [c for c in candidates if wanted in _slugify(str(c)).lower()]
         if matched:
             return matched[-1]
+        if require_prefer_match:
+            return None
     return candidates[-1]
 
 
@@ -143,6 +147,8 @@ def resolve(args: argparse.Namespace) -> int:
     resolved: list[dict[str, Any]] = []
     missing_current: list[str] = []
     missing_baseline: list[str] = []
+    baseline_owners: dict[str, str] = {}
+    duplicate_baselines: list[tuple[str, str, str]] = []
 
     for entry in behaviors:
         suite = entry.get("suite") or entry.get("name")
@@ -153,9 +159,19 @@ def resolve(args: argparse.Namespace) -> int:
 
         baseline = None
         if baseline_root is not None:
-            baseline = _find_run_dir(baseline_root, prefer=None if single else suite)
+            baseline = _find_run_dir(
+                baseline_root,
+                prefer=None if single else suite,
+                require_prefer_match=not single,
+            )
         if baseline is None:
             missing_baseline.append(entry["name"])
+        else:
+            baseline_key = str(baseline.resolve())
+            if baseline_key in baseline_owners:
+                duplicate_baselines.append((entry["name"], baseline_owners[baseline_key], str(baseline)))
+            else:
+                baseline_owners[baseline_key] = entry["name"]
 
         resolved.append(
             {
@@ -172,6 +188,18 @@ def resolve(args: argparse.Namespace) -> int:
         )
         return 1
 
+    if duplicate_baselines:
+        details = "; ".join(
+            f"{name} and {owner} both resolved to {baseline}"
+            for name, owner, baseline in duplicate_baselines
+        )
+        sys.stderr.write(
+            "::error::multiple behaviors resolved to the same baseline run: "
+            + details
+            + "\n"
+        )
+        return 1
+
     comparable = [r for r in resolved if r["baseline"]]
     Path(args.out).write_text(json.dumps(comparable, indent=2), encoding="utf-8")
     if args.all_out:
@@ -182,6 +210,8 @@ def resolve(args: argparse.Namespace) -> int:
         total=str(len(resolved)),
         baseline_available="true" if comparable else "false",
         first_current=resolved[0]["current"] if resolved else "",
+        dropped_count=str(len(missing_baseline)),
+        dropped_names=",".join(missing_baseline),
     )
     for name in missing_baseline:
         print(f"[resolve] no baseline for behavior: {name}")

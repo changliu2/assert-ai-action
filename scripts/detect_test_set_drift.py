@@ -22,6 +22,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 ACTION_VERSION = "v1.0.0-rc1"
 
@@ -59,6 +60,16 @@ def _current_stats(root: Path) -> tuple[int, float]:
     return len(rows), violations / len(rows) if rows else 0.0
 
 
+def _current_stats_many(roots: list[Path]) -> tuple[int, float]:
+    total = 0
+    weighted_violations = 0.0
+    for root in roots:
+        n_cases, violation_rate = _current_stats(root)
+        total += n_cases
+        weighted_violations += n_cases * violation_rate
+    return total, (weighted_violations / total) if total else 0.0
+
+
 def _emit(**values: str) -> None:
     """Append ``key=value`` lines to ``$GITHUB_OUTPUT``; no-op locally."""
     output = os.environ.get("GITHUB_OUTPUT")
@@ -70,10 +81,15 @@ def _emit(**values: str) -> None:
 
 
 def _write_firstrun(args: argparse.Namespace) -> int:
+    pairs = _load_pairs(args)
+    current_root = Path(pairs[0]["current"]) if pairs else args.current_run_root
+    n_cases, violation_rate = _current_stats(current_root) if current_root else (0, 0.0)
     report = {
         "action_version": ACTION_VERSION,
         "decision": "FirstRun",
         "n_paired_cases": 0,
+        "current_n_cases": n_cases,
+        "current_violation_rate": violation_rate,
         "warnings": ["baseline is missing test_set.jsonl"],
         "dimensions": [],
     }
@@ -93,23 +109,24 @@ def _write_firstrun(args: argparse.Namespace) -> int:
 
 def _write_test_set_changed(
     args: argparse.Namespace,
-    baseline_test: Path,
-    current_test: Path,
-    baseline_sha: str,
-    current_sha: str,
+    drifted: list[dict[str, str]],
 ) -> int:
-    n_cases, violation_rate = _current_stats(args.current_run_root)
+    roots = [Path(entry["current"]) for entry in _load_pairs(args)]
+    n_cases, violation_rate = _current_stats_many(roots)
+    drifted_names = [d["name"] for d in drifted]
     report = {
         "action_version": ACTION_VERSION,
         "decision": "TestSetChanged",
         "n_paired_cases": 0,
         "current_n_cases": n_cases,
         "current_violation_rate": violation_rate,
-        "baseline_test_set_sha256": baseline_sha,
-        "current_test_set_sha256": current_sha,
-        "baseline_test_set_path": str(baseline_test),
-        "current_test_set_path": str(current_test),
-        "warnings": ["test_set.jsonl changed; paired t-test skipped"],
+        "drifted_behaviors": drifted_names,
+        "test_set_drift": drifted,
+        "warnings": [
+            "test_set.jsonl changed for behavior(s): "
+            + ", ".join(drifted_names)
+            + "; paired t-test skipped"
+        ],
         "dimensions": [],
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -118,23 +135,41 @@ def _write_test_set_changed(
     args.pr_comment.write_text(
         "## 🛡️ ASSERT — safety regression gate\n\n"
         "**Gate: 🔄 TestSetChanged**\n\n"
-        f"🔄 Test set changed (baseline SHA: `{baseline_sha[:7]}`, current SHA: `{current_sha[:7]}`) — "
-        "paired t-test skipped. This is a baseline-refresh PR; merge to make it the new baseline.\n",
+        "🔄 Test set changed for behavior(s): "
+        + ", ".join(f"`{name}`" for name in drifted_names)
+        + " — paired t-test skipped. This is a baseline-refresh PR; merge to make it the new baseline.\n",
         encoding="utf-8",
     )
     _emit(**{
         "skip-compare": "true",
         "gate-verdict": "TestSetChanged",
-        "baseline-test-set-sha": baseline_sha,
-        "current-test-set-sha": current_sha,
+        "drifted-behaviors": ",".join(drifted_names),
     })
     return 0
 
 
+def _load_pairs(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if args.behaviors:
+        return json.loads(args.behaviors.read_text(encoding="utf-8"))
+    return [
+        {
+            "name": "default",
+            "baseline": str(args.baseline_root),
+            "current": str(args.current_run_root),
+        }
+    ]
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--baseline-root", required=True, type=Path)
-    p.add_argument("--current-run-root", required=True, type=Path)
+    p.add_argument(
+        "--behaviors",
+        type=Path,
+        default=None,
+        help="JSON list of per-behavior {name, baseline, current} pairs from plan_behaviors.py resolve.",
+    )
+    p.add_argument("--baseline-root", type=Path)
+    p.add_argument("--current-run-root", type=Path)
     p.add_argument(
         "--artifacts-root",
         required=True,
@@ -148,34 +183,62 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    baseline_test = _find_file(args.baseline_root, "test_set.jsonl")
-    current_test = (
-        _find_file(args.current_run_root, "test_set.jsonl")
-        or _find_file(args.artifacts_root, "test_set.jsonl")
-    )
-
-    if baseline_test is None:
+    pairs = _load_pairs(args)
+    if not pairs:
         return _write_firstrun(args)
 
-    if current_test is None:
-        print(
-            "::error::current run did not produce test_set.jsonl; cannot validate paired cases",
-            file=sys.stderr,
-        )
-        return 1
+    drifted: list[dict[str, str]] = []
+    baseline_missing: list[str] = []
+    matching_shas: list[str] = []
+    for pair in pairs:
+        name = str(pair.get("name") or pair.get("config") or "behavior")
+        baseline_root = Path(pair["baseline"])
+        current_root = Path(pair["current"])
+        baseline_test = _find_file(baseline_root, "test_set.jsonl")
+        current_test = _find_file(current_root, "test_set.jsonl")
+        if current_test is None and not args.behaviors:
+            current_test = _find_file(args.artifacts_root, "test_set.jsonl")
 
-    baseline_sha = _sha256(baseline_test)
-    current_sha = _sha256(current_test)
-    if baseline_sha == current_sha:
+        if baseline_test is None:
+            baseline_missing.append(name)
+            continue
+
+        if current_test is None:
+            print(
+                f"::error::current run for behavior {name!r} did not produce test_set.jsonl; cannot validate paired cases",
+                file=sys.stderr,
+            )
+            return 1
+
+        baseline_sha = _sha256(baseline_test)
+        current_sha = _sha256(current_test)
+        if baseline_sha != current_sha:
+            drifted.append(
+                {
+                    "name": name,
+                    "baseline_test_set_sha256": baseline_sha,
+                    "current_test_set_sha256": current_sha,
+                    "baseline_test_set_path": str(baseline_test),
+                    "current_test_set_path": str(current_test),
+                }
+            )
+        else:
+            matching_shas.append(current_sha)
+
+    if baseline_missing:
+        return _write_firstrun(args)
+
+    if not drifted:
+        sha = matching_shas[0] if matching_shas else ""
         _emit(**{
             "skip-compare": "false",
             "gate-verdict": "",
-            "baseline-test-set-sha": baseline_sha,
-            "current-test-set-sha": current_sha,
+            "baseline-test-set-sha": sha,
+            "current-test-set-sha": sha,
         })
         return 0
 
-    return _write_test_set_changed(args, baseline_test, current_test, baseline_sha, current_sha)
+    return _write_test_set_changed(args, drifted)
 
 
 if __name__ == "__main__":

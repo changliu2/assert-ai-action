@@ -28,14 +28,23 @@ def _write_config(path: Path, suite: str, behavior: str | None = None) -> Path:
     return path
 
 
-def _write_run(root: Path, suite: str, run: str, *, policy_rate: float, over_rate: float = 0.0, n: int = N) -> Path:
+def _write_run(
+    root: Path,
+    suite: str,
+    run: str,
+    *,
+    policy_rate: float,
+    over_rate: float = 0.0,
+    n: int = N,
+    test_id_prefix: str = "case",
+) -> Path:
     run_dir = root / "results" / suite / run
     run_dir.mkdir(parents=True, exist_ok=True)
     policy_true = round(policy_rate * n)
     over_true = round(over_rate * n)
     with (run_dir / "test_set.jsonl").open("w", encoding="utf-8") as fh:
         for i in range(n):
-            fh.write(json.dumps({"id": f"case-{i}", "prompt": f"Prompt {i}"}) + "\n")
+            fh.write(json.dumps({"id": f"{test_id_prefix}-{i}", "prompt": f"Prompt {i}"}) + "\n")
     with (run_dir / "scores.jsonl").open("w", encoding="utf-8") as fh:
         for i in range(n):
             fh.write(
@@ -145,6 +154,75 @@ def test_improvement_gate_significant_gain_passes(tmp_path: Path) -> None:
     assert result.outputs["decide"]["gate-verdict"] == "PASS"
 
 
+def test_min_pairs_input_allows_small_test_set_to_reach_verdict(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path / "eval" / "behavior.yaml", "small-regression")
+    base = tmp_path / "baseline"
+    _write_run(base, "small-regression", "base", policy_rate=0.0, n=20)
+
+    too_few = run_action(
+        tmp_path / "default",
+        inputs={"configs": str(cfg), "baseline": str(base)},
+        env={
+            "ASSERT_STUB_CASES": "20",
+            "ASSERT_STUB_POLICY_RATE": "1.0",
+            "ASSERT_STUB_OVERREFUSAL_RATE": "0",
+        },
+    )
+    assert too_few.returncode == 0, too_few.log
+    assert _report(tmp_path / "default")["decision"] != "FAIL"
+
+    lowered = run_action(
+        tmp_path / "lowered",
+        inputs={"configs": str(cfg), "baseline": str(base), "min-pairs": "5"},
+        env={
+            "ASSERT_STUB_CASES": "20",
+            "ASSERT_STUB_POLICY_RATE": "1.0",
+            "ASSERT_STUB_OVERREFUSAL_RATE": "0",
+        },
+    )
+    assert lowered.returncode != 0
+    assert _report(tmp_path / "lowered")["decision"] == "FAIL"
+
+
+def test_target_install_runs_when_set_and_is_skipped_when_empty(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path / "eval" / "behavior.yaml", "install-target")
+
+    empty = run_action(
+        tmp_path / "empty",
+        inputs={"configs": str(cfg), "baseline": ""},
+        env={"ASSERT_STUB_POLICY_RATE": "0.0"},
+    )
+    assert empty.returncode == 0, empty.log
+    assert empty.step("Install target").skipped
+
+    marker = "target-install-marker.txt"
+    configured = run_action(
+        tmp_path / "configured",
+        inputs={
+            "configs": str(cfg),
+            "baseline": "",
+            "target-install": f"python -c \"open('{marker}','w').write('installed')\"",
+        },
+        env={"ASSERT_STUB_POLICY_RATE": "0.0"},
+    )
+    assert configured.returncode == 0, configured.log
+    assert not configured.step("Install target").skipped
+    assert (tmp_path / "configured" / marker).read_text(encoding="utf-8") == "installed"
+
+
+def test_target_install_failure_is_loud(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path / "eval" / "behavior.yaml", "install-fails")
+    result = run_action(
+        tmp_path,
+        inputs={"configs": str(cfg), "baseline": "", "target-install": "echo broken target install; exit 42"},
+        env={"ASSERT_STUB_POLICY_RATE": "0.0"},
+    )
+
+    assert result.returncode == 42
+    assert result.step("Install target").returncode == 42
+    assert "broken target install" in result.step("Install target").stdout
+
+
 def test_multi_behavior_glob_gets_distinct_artifact_roots(tmp_path: Path) -> None:
     for i in range(3):
         _write_config(tmp_path / "eval" / "behaviors" / f"behavior {i}.yaml", f"family-{i}", f"behavior {i}")
@@ -167,6 +245,26 @@ def test_multi_behavior_glob_gets_distinct_artifact_roots(tmp_path: Path) -> Non
     assert report["behaviors_evaluated"] == 3
     assert report["family_size"] == 6
     assert result.outputs["decide"]["behaviors-evaluated"] == "3"
+
+
+def test_multi_behavior_drift_reports_only_drifted_behavior(tmp_path: Path) -> None:
+    _write_config(tmp_path / "eval" / "behaviors" / "stable.yaml", "stable-suite", "stable")
+    _write_config(tmp_path / "eval" / "behaviors" / "drifted.yaml", "drifted-suite", "drifted")
+    base = tmp_path / "baseline"
+    _write_run(base, "stable-suite", "base", policy_rate=0.1)
+    _write_run(base, "drifted-suite", "base", policy_rate=0.1, test_id_prefix="old-case")
+
+    result = run_action(
+        tmp_path,
+        inputs={"configs": "eval/behaviors/*.yaml", "baseline": str(base)},
+        env={"ASSERT_STUB_POLICY_RATE": "0.1", "ASSERT_STUB_OVERREFUSAL_RATE": "0"},
+    )
+
+    assert result.returncode == 0, result.log
+    report = _report(tmp_path)
+    assert report["decision"] == "TestSetChanged"
+    assert report["drifted_behaviors"] == ["drifted"]
+    assert "drifted" in (tmp_path / "pr_comment.md").read_text(encoding="utf-8")
 
 
 def test_deprecated_config_input_still_warns_and_runs(tmp_path: Path) -> None:

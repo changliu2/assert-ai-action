@@ -38,6 +38,10 @@ inputs:
     description: 'Family-wise significance level for the Holm-Bonferroni correction.'
     required: false
     default: '0.05'
+  min-pairs:
+    description: 'Minimum paired test cases required before a dimension can reach a statistical verdict.'
+    required: false
+    default: '30'
   baseline:
     description: >-
       Path to a baseline run directory, or the NAME of an artifact uploaded by a
@@ -59,6 +63,12 @@ inputs:
     description: "Comma-separated assert-ai extras to install from PyPI (for example: 'regression,otel,langgraph')."
     required: false
     default: 'regression'
+  target-install:
+    description: >-
+      Optional shell command run in the workspace after assert-ai is installed
+      and before eval execution, for example: pip install -e .
+    required: false
+    default: ''
   provider-env:
     description: >-
       Newline-delimited KEY=VALUE pairs exported for the eval run. Use this for
@@ -159,6 +169,17 @@ runs:
           echo "$selected"
           echo "__ASSERT_EOF__"
         } >> "$GITHUB_OUTPUT"
+
+    - name: Install target
+      if: ${{ inputs.target-install != '' }}
+      shell: bash
+      env:
+        TARGET_INSTALL: ${{ inputs.target-install }}
+      run: |
+        set -euo pipefail
+        echo "::group::target-install"
+        bash -euo pipefail -c "$TARGET_INSTALL"
+        echo "::endgroup::"
 
     - name: Plan behaviors
       id: plan
@@ -288,8 +309,7 @@ runs:
       shell: bash
       run: |
         python "${{ github.action_path }}/scripts/detect_test_set_drift.py" \
-          --baseline-root "${{ steps.resolve-baseline.outputs.baseline-root }}" \
-          --current-run-root "${{ steps.locate.outputs.first-current }}" \
+          --behaviors assert-ai-comparable.json \
           --artifacts-root "${{ github.workspace }}/assert-ai-artifacts" \
           --out gate_report.json \
           --pr-comment pr_comment.md
@@ -304,9 +324,47 @@ runs:
           --primary-dimension "${{ inputs.primary-dimension }}" \
           --guard-dimensions "${{ inputs.guard-dimensions }}" \
           --alpha "${{ inputs.alpha }}" \
+          --min-pairs "${{ inputs.min-pairs }}" \
           --out gate_report.json \
           --pr-comment pr_comment.md \
           --allow-inconclusive "${{ inputs.allow-inconclusive }}"
+
+    - name: Annotate partial coverage
+      if: ${{ steps.locate.outputs.dropped-count != '0' && hashFiles('gate_report.json') != '' }}
+      shell: bash
+      env:
+        DROPPED_COUNT: ${{ steps.locate.outputs.dropped-count }}
+        DROPPED_NAMES: ${{ steps.locate.outputs.dropped-names }}
+      run: |
+        python <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        report_path = Path("gate_report.json")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        names = [n for n in os.environ.get("DROPPED_NAMES", "").split(",") if n]
+        count = int(os.environ.get("DROPPED_COUNT") or len(names) or 0)
+        warning = (
+            f"{count} behavior(s) had no matching baseline and were not evaluated: "
+            + (", ".join(names) if names else "(names unavailable)")
+        )
+        report["dropped_behavior_count"] = count
+        report["dropped_behaviors"] = names
+        report.setdefault("warnings", []).append(warning)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+        comment = Path("pr_comment.md")
+        if comment.is_file():
+            with comment.open("a", encoding="utf-8") as fh:
+                fh.write(
+                    "\n\n> ⚠️ Partial behavior coverage: "
+                    f"{count} behavior(s) had no matching baseline and were not evaluated"
+                )
+                if names:
+                    fh.write(": `" + "`, `".join(names) + "`")
+                fh.write(".\n")
+        PY
 
     - name: Append gate report to job summary
       if: ${{ always() && hashFiles('pr_comment.md') != '' }}

@@ -197,6 +197,84 @@ def test_resolve_reports_no_baseline_without_failing(tmp_path, monkeypatch) -> N
     assert resolved[0]["baseline"] is None
 
 
+def test_resolve_emits_dropped_behavior_count_and_names(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    output = tmp_path / "github-output.txt"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    _write_config(tmp_path / "eval" / "behaviors" / "with.yaml", "with-baseline", "with baseline")
+    _write_config(tmp_path / "eval" / "behaviors" / "without.yaml", "without-baseline", "without baseline")
+    plan_behaviors.main(
+        [
+            "plan",
+            "--configs",
+            "eval/behaviors/*.yaml",
+            "--artifacts-root",
+            str(tmp_path / "arts"),
+            "--out",
+            "manifest.json",
+        ]
+    )
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    for entry in manifest:
+        _write_scores(Path(entry["artifacts_root"]) / "results" / entry["suite"] / "run1", {"case-0": {"policy_violation": False}})
+    _write_scores(tmp_path / "base" / "results" / "with-baseline" / "run0", {"case-0": {"policy_violation": False}})
+
+    rc = plan_behaviors.main(
+        [
+            "resolve",
+            "--manifest",
+            "manifest.json",
+            "--baseline-root",
+            str(tmp_path / "base"),
+            "--out",
+            "comparable.json",
+        ]
+    )
+
+    assert rc == 0
+    comparable = json.loads((tmp_path / "comparable.json").read_text(encoding="utf-8"))
+    assert [entry["name"] for entry in comparable] == ["with baseline"]
+    emitted = output.read_text(encoding="utf-8")
+    assert "dropped-count=1" in emitted
+    assert "dropped-names=without baseline" in emitted
+
+
+def test_resolve_errors_when_two_behaviors_share_one_baseline_run(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_config(tmp_path / "eval" / "behaviors" / "a.yaml", "shared-suite", "alpha")
+    _write_config(tmp_path / "eval" / "behaviors" / "b.yaml", "shared-suite", "beta")
+    plan_behaviors.main(
+        [
+            "plan",
+            "--configs",
+            "eval/behaviors/*.yaml",
+            "--artifacts-root",
+            str(tmp_path / "arts"),
+            "--out",
+            "manifest.json",
+        ]
+    )
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    for entry in manifest:
+        _write_scores(Path(entry["artifacts_root"]) / "results" / entry["suite"] / "run1", {"case-0": {"policy_violation": False}})
+    _write_scores(tmp_path / "base" / "results" / "shared-suite" / "run0", {"case-0": {"policy_violation": False}})
+
+    rc = plan_behaviors.main(
+        [
+            "resolve",
+            "--manifest",
+            "manifest.json",
+            "--baseline-root",
+            str(tmp_path / "base"),
+            "--out",
+            "comparable.json",
+        ]
+    )
+
+    assert rc == 1
+    assert "multiple behaviors resolved to the same baseline run" in capsys.readouterr().err
+
+
 def test_plan_then_resolve_then_compare_runs_end_to_end(tmp_path, monkeypatch) -> None:
     """The full multi-behavior chain the action wires together."""
     monkeypatch.chdir(tmp_path)
