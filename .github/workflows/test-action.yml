@@ -15,9 +15,11 @@ jobs:
       - name: Install helper dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy scipy pytest
+          python -m pip install numpy scipy pytest PyYAML
       - name: Run helper unit tests
         run: python -m pytest -q
+      - name: Check the skill bundle matches the action contract
+        run: python scripts/check_bundle.py
       - name: Run paired gate against fixture artifacts
         run: |
           python scripts/compare_runs.py \

@@ -82,12 +82,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - uses: actions/download-artifact@v4
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
-        with:
-          name: assert-ai-baseline
-          path: assert-ai-baseline
+      # No download-artifact step: artifacts are scoped to the run that made
+      # them, so a PR cannot see the default branch's baseline on its own. The
+      # action resolves the right run itself, which is why it needs actions: read.
       - uses: responsibleai/assert-action@v1
         with:
           configs: eval/behaviors/*.yaml
