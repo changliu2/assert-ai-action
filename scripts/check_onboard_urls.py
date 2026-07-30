@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 onboard = io.open(ROOT / "ONBOARD.md", encoding="utf-8").read()
 
-RAW = r"https://raw\.githubusercontent\.com/responsibleai/assert-action/([^/]+)/(\S+?)(?=[\s`)]|$)"
+RAW = r"https://raw\.githubusercontent\.com/changliu2/assert-ai-action/([^/]+)/(\S+?)(?=[\s`)]|$)"
 
 problems = []
 urls = re.findall(RAW, onboard)

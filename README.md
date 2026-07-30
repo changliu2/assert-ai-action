@@ -10,7 +10,7 @@ ASSERT configs are written **one behavior per YAML**, so the gate takes a glob a
 For Copilot CLI, Claude Code, or Cursor, paste this URL into the agent to install the ASSERT CI skill bundle and wire the workflow:
 
 ```text
-read https://raw.githubusercontent.com/responsibleai/assert-action/main/ONBOARD.md
+read https://raw.githubusercontent.com/changliu2/assert-ai-action/main/ONBOARD.md
 ```
 
 The bundle installs from [`skills/`](skills/) and uses BYO provider credentials from repository secrets such as `AZURE_API_KEY`, `AZURE_API_BASE`, `AZURE_API_VERSION`, or `OPENAI_API_KEY`.
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: responsibleai/assert-action@v1
+      - uses: changliu2/assert-ai-action@v1
         with:
           configs: eval/behaviors/*.yaml
           baseline: assert-ai-baseline
@@ -145,7 +145,7 @@ Baselines are normal GitHub Actions artifacts from trusted runs on the default b
 
 ## Versioning and compatibility
 
-`assert-ai-version` defaults to `0.1.0`; override it to move independently of the action. Use `responsibleai/assert-action@v1` for the floating major tag with compatible bug fixes, or pin an exact tag such as `@v1.0.0`.
+`assert-ai-version` defaults to `0.1.0`; override it to move independently of the action. Use `changliu2/assert-ai-action@v1` for the floating major tag with compatible bug fixes, or pin an exact tag such as `@v1.0.0`.
 
 ## Contributing and license
 
