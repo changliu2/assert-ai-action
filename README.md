@@ -1,19 +1,39 @@
 # ASSERT safety regression gate
 
-A composite GitHub Action that runs `assert-ai` evals on every PR and gates merges against safety regressions detected with a paired t-test. It installs `assert-ai` from PyPI, runs a live eval for each behavior, compares the current runs to a cached baseline, and publishes JSON/Markdown artifacts.
+A composite GitHub Action that runs `assert-ai` evals on every PR and gates merges against safety regressions detected with a paired-binary McNemar test. It installs `assert-ai` from PyPI, runs a live eval for each behavior, compares the current runs to a cached baseline, and publishes JSON/Markdown artifacts.
 
 ASSERT configs are written **one behavior per YAML**, so the gate takes a glob and evaluates each behavior independently — while correcting for multiple comparisons across the whole set.
 
 
 ## Coding-agent onboarding
 
-For Copilot CLI, Claude Code, or Cursor, paste this URL into the agent to install the ASSERT CI skill bundle and wire the workflow:
+Two ways in. Both end with a working gate; pick based on whether you have Node.
+
+### Option 1 — install the skills (recommended, 40+ agents)
+
+```bash
+npx skills add changliu2/assert-ai-action --skill "*" --yes
+```
+
+Installs `wire-assert-ci` and `run-assert-eval` for Cursor, Claude Code, GitHub Copilot, Gemini CLI, Amp, Windsurf, Codex, and [40+ other agents](https://github.com/vercel-labs/skills#supported-agents). Drop the flags for an interactive picker.
+
+Then just say what you want:
+
+> Use the `wire-assert-ci` skill to add an ASSERT safety gate to this repo.
+
+### Option 2 — paste one URL (no install, no Node)
 
 ```text
 read https://raw.githubusercontent.com/changliu2/assert-ai-action/main/ONBOARD.md
 ```
 
-The bundle installs from [`skills/`](skills/) and uses BYO provider credentials from repository secrets such as `AZURE_API_KEY`, `AZURE_API_BASE`, `AZURE_API_VERSION`, or `OPENAI_API_KEY`.
+Works in Copilot CLI, Claude Code, and Cursor. The agent fetches the skill files itself.
+
+### What happens next
+
+Either way, the agent scans your repo, picks the highest-fidelity way to reach your agent (auto-traced → bring-your-own-trace → callable → HTTP endpoint → prompt-agent), drafts an eval spec from your own README and prompts, **asks you to confirm or replace it**, splits it one behavior per YAML, runs a baseline, and opens the gate PR.
+
+You bring your own model credentials as repository secrets — `AZURE_API_KEY`, `AZURE_API_BASE`, `AZURE_API_VERSION`, or `OPENAI_API_KEY`. There is no shared endpoint.
 
 ## Quickstart
 
@@ -94,7 +114,7 @@ You do **not** need a `download-artifact` step. Artifacts are scoped to the run 
 |---|---|
 | `gate-verdict` | `PASS`, `WARN`, `FAIL`, `FirstRun`, `TestSetChanged`, or `Inconclusive`. |
 | `gate-report-path` | Path to `gate_report.json`. |
-| `n-paired-cases` | Number of paired cases used by the t-test. |
+| `n-paired-cases` | Number of paired cases used by the paired-binary test. |
 | `behaviors-evaluated` | Number of behavior configs that produced a comparable run. |
 | `pr-comment-url` | URL of the posted or updated PR comment, if posted. |
 
