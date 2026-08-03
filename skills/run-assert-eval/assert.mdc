@@ -1,14 +1,19 @@
 ---
-description: Self-contained run-assert-eval evaluation workflow for customer repositories.
+description: ASSERT repo orientation pointer plus the self-contained run-assert-eval evaluation workflow.
 globs:
 alwaysApply: true
 ---
 
+> Provenance: vendored verbatim from responsibleai/ASSERT (https://raw.githubusercontent.com/responsibleai/ASSERT/main/.cursor/rules/assert.mdc).
+> Do not edit this copy -- change it upstream, then run
+> `python scripts/sync_vendored_skill.py --sync`. CI enforces that this file
+> matches upstream exactly apart from this header.
+
 # ASSERT — Cursor rules
 
-> Provenance: vendored from responsibleai/ASSERT (https://raw.githubusercontent.com/responsibleai/ASSERT/main/.cursor/rules/assert.mdc). Keep this copy in sync with upstream.
-
-For ASSERT orientation, terminology, and target selection, read the public docs: https://github.com/responsibleai/ASSERT/blob/main/docs/targets/README.md and https://github.com/responsibleai/ASSERT/blob/main/docs/getting-started.md.
+Read `AGENTS.md` at the repository root first. It is the **single source of truth** for this
+repository's orientation, terminology, target selection, setup commands, and how to help with common
+tasks. For orientation, do not copy AGENTS.md content here — read it there so the two cannot drift.
 
 Never read, print, commit, summarize, or infer values from `.env` or other local environment files.
 Reference env variable NAMES only (AZURE_API_KEY, AZURE_API_BASE, azure_ad_token,
@@ -38,7 +43,8 @@ stepping with citations highlighted). Answer in chat for "what / why / which"; h
 
 ### Preconditions (check, don't assume)
 
-1. **ASSERT installed**: verify `assert-ai --help` succeeds. If not, guide install from PyPI, not the customer repo: `python -m pip install "assert-ai[otel]"`. Add route-specific extras when needed, for example `assert-ai[otel,langgraph]` for LangGraph or `assert-ai[aiohttp]` for `target.endpoint`.
+1. **ASSERT installed**: verify `assert-ai --help` succeeds. If not, guide install:
+   `python -m pip install -e ".[otel,langgraph]"`.
 2. **Provider creds exist** in `.env`. NEVER read or print `.env`. On an auth error, tell the user
    which variable NAMES are required (AZURE_API_KEY, AZURE_API_BASE, OPENAI_API_KEY, etc.) — never values.
 
@@ -56,7 +62,6 @@ stepping with citations highlighted). Answer in chat for "what / why / which"; h
 
 - **Framework agent** (LangGraph, CrewAI, etc.) with a Python entry function: `target.callable`
   WITH `target.trace` so the judge can cite tool calls and routing.
-- **HTTP endpoint** that accepts `{"message": ..., "history": [...]}` and returns `{"response": ...}`: native `target.endpoint` (requires the `aiohttp` extra). Use a `target.callable` shim only when the service shape differs.
 - **Hosted model** with a system prompt and optional tools: `target.model` and `target.tools`.
 - **Pre-collected traces** (no live inference): `assert-ai judge-traces --traces <path> --config <path>`.
 

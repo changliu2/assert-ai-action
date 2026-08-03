@@ -24,6 +24,8 @@ jobs:
         run: python scripts/check_bundle.py
       - name: Check ONBOARD.md URLs resolve
         run: python scripts/check_onboard_urls.py
+      - name: Check the vendored run-assert-eval skill matches upstream ASSERT
+        run: python scripts/sync_vendored_skill.py
       - name: Run paired gate against fixture artifacts
         run: |
           python scripts/compare_runs.py \
