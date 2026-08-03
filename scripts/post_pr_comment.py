@@ -73,7 +73,7 @@ def _special_body(report: dict[str, Any]) -> str | None:
             "## 🛡️ ASSERT — safety regression gate\n\n"
             "**Gate: 🔄 TestSetChanged**\n\n"
             f"🔄 Test set changed (baseline SHA: `{baseline_sha}`, current SHA: `{current_sha}`) — "
-            "paired t-test skipped. This is a baseline-refresh PR; merge to make it the new baseline.\n"
+            "paired comparison skipped. This is a baseline-refresh PR; merge to make it the new baseline.\n"
         )
     return None
 

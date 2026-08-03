@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: ASSERT project
+    url: https://github.com/responsibleai/ASSERT
+    about: Use the ASSERT repository for core CLI, config schema, target, or judge issues.

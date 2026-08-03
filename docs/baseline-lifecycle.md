@@ -72,10 +72,10 @@ If no trusted artifact is available, the action returns `FirstRun` and still upl
 
 ## Test-set drift
 
-The paired t-test is valid only when baseline and current runs score the same cases. The action compares SHA256 hashes of `test_set.jsonl`:
+The paired-binary comparison is valid only when baseline and current runs score the same cases. The action compares SHA256 hashes of `test_set.jsonl`:
 
 - same hash: run the paired gate.
-- different hash: return `TestSetChanged` and skip the t-test.
+- different hash: return `TestSetChanged` and skip the paired comparison.
 
 Treat `TestSetChanged` as a baseline-refresh PR. Review why the cases changed, merge if expected, then let the next `main` run publish the new baseline.
 

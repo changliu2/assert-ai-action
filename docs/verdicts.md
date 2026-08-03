@@ -21,4 +21,4 @@ ASSERT emits one top-level gate verdict and per-dimension statistical verdicts. 
 | `Uncertain` | Same statistical result as `Inconclusive`, but `allow-inconclusive` is false. | Produces `WARN`. |
 | `TooFewSamples` | Fewer than `--min-pairs` paired cases were available. | Produces `WARN`. |
 
-The comparator uses a paired t-test over binary violation outcomes and applies Holm-Bonferroni correction across judge dimensions.
+The comparator uses a paired-binary McNemar test over violation outcomes and applies Holm-Bonferroni correction across judge dimensions.

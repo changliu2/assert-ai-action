@@ -1,0 +1,37 @@
+name: Bug report
+description: Report a reproducible problem with the ASSERT GitHub Action
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not paste secrets, `.env` values, private prompts, model outputs, or raw ASSERT artifacts.
+  - type: input
+    id: version
+    attributes:
+      label: Action version
+      description: For example, `changliu2/assert-ai-action@v1` or `@v1.0.0`.
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow snippet
+      description: Paste the relevant YAML with secret values replaced by placeholders.
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the friendly error message or sanitized log excerpt.
+    validations:
+      required: true

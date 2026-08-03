@@ -2,7 +2,7 @@
 """Detect baseline-vs-current test-set drift before running the paired gate.
 
 When the test set changes (judged via SHA-256 of ``test_set.jsonl``), the
-paired t-test is skipped because pairing is no longer valid. This script:
+paired comparison is skipped because pairing is no longer valid. This script:
 
 1. Emits a ``TestSetChanged`` gate report and PR comment.
 2. Signals ``action.yml`` via ``GITHUB_OUTPUT`` to skip the comparator
@@ -125,7 +125,7 @@ def _write_test_set_changed(
         "warnings": [
             "test_set.jsonl changed for behavior(s): "
             + ", ".join(drifted_names)
-            + "; paired t-test skipped"
+            + "; paired comparison skipped"
         ],
         "dimensions": [],
     }
@@ -137,7 +137,7 @@ def _write_test_set_changed(
         "**Gate: 🔄 TestSetChanged**\n\n"
         "🔄 Test set changed for behavior(s): "
         + ", ".join(f"`{name}`" for name in drifted_names)
-        + " — paired t-test skipped. This is a baseline-refresh PR; merge to make it the new baseline.\n",
+        + " — paired comparison skipped. This is a baseline-refresh PR; merge to make it the new baseline.\n",
         encoding="utf-8",
     )
     _emit(**{

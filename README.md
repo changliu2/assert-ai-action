@@ -167,6 +167,8 @@ Baselines are normal GitHub Actions artifacts from trusted runs on the default b
 
 `assert-ai-version` defaults to `0.1.0`; override it to move independently of the action. Use `changliu2/assert-ai-action@v1` for the floating major tag with compatible bug fixes, or pin an exact tag such as `@v1.0.0`.
 
+Release tags use semantic versions, and the floating major tag must point to the same commit as the latest compatible exact tag. See [`docs/release-procedure.md`](docs/release-procedure.md) before cutting or moving release tags.
+
 ## Contributing and license
 
 Contributions are welcome through pull requests. Licensed under the [MIT License](LICENSE).
