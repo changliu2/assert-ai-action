@@ -105,7 +105,7 @@ def check_front_doors_agree() -> None:
         "acs generate",
         "auto_trace",
     ]
-    for skill in ("wire-assert-ci", "run-assert-eval"):
+    for skill in ("wire-assert-ci",):
         files = sorted((ROOT / "skills" / skill).glob("*"))
         if not files:
             fail(f"{skill}: no front-door files found")
@@ -116,6 +116,45 @@ def check_front_doors_agree() -> None:
             if present and len(present) != len(texts):
                 missing = sorted(set(texts) - present)
                 fail(f"{skill}: '{concept}' missing from {missing}")
+
+
+# Skills owned by responsibleai/ASSERT. They are linked, never copied: Alex keeps
+# updating them, and a copy here silently forks. An earlier vendored copy of
+# run-assert-eval drifted in both directions within weeks -- it had dropped
+# upstream's target.endpoint guidance while upstream still told users to run an
+# editable install of their own repo. Neither side noticed, because nothing
+# checked. This makes re-introducing that copy a build failure.
+UPSTREAM_OWNED_SKILLS = {"run-assert-eval"}
+
+
+def check_no_vendored_upstream_skill() -> None:
+    for skill in sorted(UPSTREAM_OWNED_SKILLS):
+        local = ROOT / "skills" / skill
+        if local.exists():
+            fail(
+                f"skills/{skill}/ is owned by responsibleai/ASSERT and must not be "
+                "vendored here -- it will silently fork. Delete the directory and "
+                "let ONBOARD.md install it from upstream instead."
+            )
+
+    # A copy can also creep back in under a different directory name, so match on
+    # the skill's declared frontmatter name rather than on the path.
+    for path in sorted(ROOT.glob("skills/*/*.md")):
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---"):
+            continue
+        _, _, rest = text.partition("---")
+        block, _, _ = rest.partition("---")
+        try:
+            meta = yaml.safe_load(block) or {}
+        except yaml.YAMLError:
+            continue
+        name = meta.get("name")
+        if name in UPSTREAM_OWNED_SKILLS:
+            fail(
+                f"{path.relative_to(ROOT)} declares name '{name}', which is owned "
+                "by responsibleai/ASSERT. Link to it; do not vendor it."
+            )
 
 
 def check_no_wrong_repo_name() -> None:
@@ -145,6 +184,7 @@ def main() -> int:
     check_workflow_snippets(action_inputs())
     check_front_doors_agree()
     check_no_wrong_repo_name()
+    check_no_vendored_upstream_skill()
     check_onboard_urls()
     if FAILURES:
         print(f"\n{len(FAILURES)} problem(s)")

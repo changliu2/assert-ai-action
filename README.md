@@ -12,10 +12,13 @@ Two ways in. Both end with a working gate; pick based on whether you have Node.
 ### Option 1 — install the skills (recommended, 40+ agents)
 
 ```bash
-npx skills add changliu2/assert-ai-action --skill "*" --yes
+npx skills add responsibleai/ASSERT --skill run-assert-eval --yes
+npx skills add changliu2/assert-ai-action --skill wire-assert-ci --yes
 ```
 
 Installs `wire-assert-ci` and `run-assert-eval` for Cursor, Claude Code, GitHub Copilot, Gemini CLI, Amp, Windsurf, Codex, and [40+ other agents](https://github.com/vercel-labs/skills#supported-agents). Drop the flags for an interactive picker.
+
+Two commands because the bundle spans two repos on purpose: `run-assert-eval` is owned upstream in [`responsibleai/ASSERT`](https://github.com/responsibleai/ASSERT) and installed from there rather than copied here, so it never goes stale. Run them separately — `skills add` takes one package per invocation and silently ignores extras while still exiting 0.
 
 Then just say what you want:
 

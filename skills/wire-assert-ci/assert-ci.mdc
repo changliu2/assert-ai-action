@@ -12,11 +12,20 @@ Use this skill to onboard the current repository to an ASSERT safety gate. All c
 
 `wire-assert-ci` owns repo scan, route detection, target wrapping, spec extraction and confirmation, behavior splitting, CI workflow authoring, baseline/config commit, and ACS PR setup. `run-assert-eval` owns `assert-ai init`, live pipeline execution, result reporting, Results Q&A, and local viewer hand-off. Delegate those steps; do not duplicate its reporting instructions. Link to the ASSERT target source of truth instead of copying broad target docs: https://github.com/responsibleai/ASSERT/blob/main/docs/targets/README.md.
 
+`run-assert-eval` is a **separate skill owned upstream in `responsibleai/ASSERT`**, not shipped alongside this one. It is deliberately never copied into this repo: it is updated independently, and a vendored copy silently forks. Always delegate to the installed skill rather than restating its steps here.
+
 ## Preconditions
 
 1. Confirm the repo uses git and inspect current status. Do not overwrite user work.
 2. Confirm `assert-ai --help` works. If missing, install ASSERT from PyPI, not the customer's repo: `python -m pip install "assert-ai[otel]"`. Add extras for the selected route: `regression,otel` for Rung 1 tracing; `regression,otel,langgraph` for LangGraph; `regression,aiohttp` for Rung 3 `target.endpoint`; plus any framework extra the target needs. The editable command `python -m pip install -e ".[otel,langgraph]"` is only correct inside the ASSERT repo itself.
-3. Tell the user: live ASSERT runs call their configured model/provider and cost money. A tiny smoke run is acceptable only to prove wiring. A committed gate needs at least `min-pairs` paired cases per behavior (default 30; use about 40 for margin), so a real gate often takes tens of minutes, not seconds.
+3. Confirm the `run-assert-eval` skill is available to you. If it is not, install it from its source repo before going further:
+
+   ```bash
+   npx skills add responsibleai/ASSERT --skill run-assert-eval --yes
+   ```
+
+   If `npx` is unavailable, fetch the file matching this assistant from `https://raw.githubusercontent.com/responsibleai/ASSERT/main/` — `.claude/skills/run-assert-eval/SKILL.md`, `.github/prompts/run-assert-eval.prompt.md`, or `.cursor/rules/assert.mdc`. Do not proceed by reimplementing its steps inline; the delegation boundary is what keeps the two skills from drifting.
+4. Tell the user: live ASSERT runs call their configured model/provider and cost money. A tiny smoke run is acceptable only to prove wiring. A committed gate needs at least `min-pairs` paired cases per behavior (default 30; use about 40 for margin), so a real gate often takes tens of minutes, not seconds.
 
 ## 1. Scan and choose a target route
 

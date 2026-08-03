@@ -4,23 +4,34 @@ BYO keys are required: there is no shared ASSERT endpoint. The user must provide
 
 ## Step 1 — install the skills
 
-**Preferred.** If Node is available, run this and skip to Step 2. It covers 40+ agents, detects the host automatically, and stays current without this file being edited:
+This bundle is **two skills from two repositories**, and that is deliberate:
+`run-assert-eval` is owned upstream in `responsibleai/ASSERT` and is installed
+from there, never copied here, so you always get the current version.
+
+**Preferred.** If Node is available, run **both** commands, then skip to Step 2.
+They cover 40+ agents and detect the host automatically:
 
 ```bash
-npx skills add changliu2/assert-ai-action --skill "*" --yes
+npx skills add responsibleai/ASSERT --skill run-assert-eval --yes
+npx skills add changliu2/assert-ai-action --skill wire-assert-ci --yes
 ```
 
-**Fallback.** Only if `npx` is unavailable or the command fails, detect the assistant and fetch the matching files by hand:
+Run them as two separate commands. `skills add` accepts only one package per
+invocation and **silently ignores extra ones while still exiting 0**, so a
+combined command looks like it worked and leaves you with half the bundle.
+
+**Fallback.** Only if `npx` is unavailable or the commands fail, detect the
+assistant and fetch the matching files by hand. Note the two different hosts:
 
 - Claude Code:
   - `https://raw.githubusercontent.com/changliu2/assert-ai-action/main/skills/wire-assert-ci/SKILL.md` -> `.claude/skills/wire-assert-ci/SKILL.md`
-  - `https://raw.githubusercontent.com/changliu2/assert-ai-action/main/skills/run-assert-eval/SKILL.md` -> `.claude/skills/run-assert-eval/SKILL.md`
+  - `https://raw.githubusercontent.com/responsibleai/ASSERT/main/.claude/skills/run-assert-eval/SKILL.md` -> `.claude/skills/run-assert-eval/SKILL.md`
 - GitHub Copilot CLI:
   - `https://raw.githubusercontent.com/changliu2/assert-ai-action/main/skills/wire-assert-ci/wire-assert-ci.prompt.md` -> `.github/prompts/wire-assert-ci.prompt.md`
-  - `https://raw.githubusercontent.com/changliu2/assert-ai-action/main/skills/run-assert-eval/run-assert-eval.prompt.md` -> `.github/prompts/run-assert-eval.prompt.md`
+  - `https://raw.githubusercontent.com/responsibleai/ASSERT/main/.github/prompts/run-assert-eval.prompt.md` -> `.github/prompts/run-assert-eval.prompt.md`
 - Cursor:
   - `https://raw.githubusercontent.com/changliu2/assert-ai-action/main/skills/wire-assert-ci/assert-ci.mdc` -> `.cursor/rules/assert-ci.mdc`
-  - `https://raw.githubusercontent.com/changliu2/assert-ai-action/main/skills/run-assert-eval/assert.mdc` -> `.cursor/rules/assert.mdc`
+  - `https://raw.githubusercontent.com/responsibleai/ASSERT/main/.cursor/rules/assert.mdc` -> `.cursor/rules/assert.mdc`
 
 Create parent directories if missing. Do not overwrite unrelated local files without showing the diff first.
 
