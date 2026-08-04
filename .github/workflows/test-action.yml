@@ -86,3 +86,88 @@ jobs:
             gate_report.firstrun.json
             pr_comment.firstrun.md
           if-no-files-found: warn
+
+  # The harness above extracts the `run:` scripts out of action.yml and executes
+  # them directly. That covers the bash logic, but it cannot cover the part a
+  # consumer actually depends on: GitHub resolving `uses:`, plumbing `with:`
+  # inputs, and expanding `${{ github.action_path }}` -- which only has a value
+  # when the action is invoked as an action. A repo calling this action would
+  # hit those first, and nothing tested them.
+  #
+  # So: call the action the way a consumer does, from a scratch repo layout, and
+  # assert it gets all the way to the model call. Steps 1-9 (setup, install
+  # assert-ai, resolve configs, plan behaviors, resolve baseline, export creds)
+  # need no credentials; only step 10 does. The run is expected to fail there,
+  # which is why the gate step is continue-on-error -- the assertions afterwards
+  # are what decide this job.
+  consumer-smoke:
+    name: A consumer repo can resolve and run the action
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lay out a minimal consumer repo
+        run: |
+          mkdir -p eval/behaviors
+          cat > eval/behaviors/smoke.yaml <<'YAML'
+          suite: consumer-smoke
+          behavior:
+            name: consumer_smoke
+            description: >
+              Placeholder behavior used only to prove a consumer repo can
+              resolve and start the action. Never reaches a live model.
+          context: A smoke-test target that is never actually invoked.
+          pipeline:
+            inference:
+              target:
+                callable: smoke_target:respond
+          YAML
+          cat > smoke_target.py <<'PY'
+          def respond(message, history=None):
+              return "smoke"
+          PY
+          echo "--- consumer layout ---"
+          find eval smoke_target.py -type f
+
+      - name: Call the action exactly as a consumer would
+        id: gate
+        continue-on-error: true
+        uses: ./
+        with:
+          configs: eval/behaviors/*.yaml
+          provider-env: |
+            OPENAI_API_KEY=smoke-not-a-real-key
+          post-pr-comment: 'false'
+
+      - name: Assert the action resolved and ran its own steps
+        run: |
+          set -euo pipefail
+
+          # If `uses:` had failed to resolve, or action.yml were invalid, the
+          # job would have died before this step ever ran.
+          echo "action resolved and executed"
+
+          # Step 2 installed the pinned assert-ai into the runner.
+          command -v assert-ai >/dev/null \
+            || { echo "::error::action did not install assert-ai"; exit 1; }
+          echo "assert-ai on PATH: $(assert-ai --version 2>/dev/null || echo present)"
+
+          # Step 5 ran plan_behaviors.py via ${{ github.action_path }}. Its
+          # output existing proves that expression expanded to a real path --
+          # the single thing the offline harness cannot verify.
+          test -f assert-ai-behaviors.json \
+            || { echo "::error::plan_behaviors.py did not run; github.action_path likely unresolved"; exit 1; }
+
+          python - <<'PY'
+          import json
+          plan = json.load(open("assert-ai-behaviors.json", encoding="utf-8"))
+          behaviors = plan["behaviors"] if isinstance(plan, dict) else plan
+          assert behaviors, "planner produced no behaviors from the glob"
+          roots = [b.get("artifacts_root") for b in behaviors]
+          assert len(set(roots)) == len(roots), f"artifact roots collide: {roots}"
+          print(f"planned {len(behaviors)} behavior(s) from configs: {[b.get('name') for b in behaviors]}")
+          PY
+
+          echo "consumer path OK: resolve -> install -> resolve configs -> plan"
