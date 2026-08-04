@@ -132,7 +132,16 @@ runs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-        cache: pip
+        # No `cache: pip` here, deliberately. setup-python's pip cache hashes
+        # a dependency file from the *calling* repo, and hard-fails with
+        # "No file matched to [**/requirements.txt or **/pyproject.toml]" when
+        # the consumer has neither at its root -- a Node repo with a Python
+        # agent, a repo whose pyproject.toml lives in a subdirectory, or one
+        # that vendors its dependencies. Because this is the action's first
+        # step, that failure skips every step after it, so the gate silently
+        # does nothing instead of evaluating anything. We only install
+        # assert-ai from PyPI, so the cache buys a few seconds and costs the
+        # action's ability to run in a large class of repositories.
 
     - name: Install assert-ai
       shell: bash

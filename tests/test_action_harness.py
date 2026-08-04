@@ -335,3 +335,35 @@ def test_referenced_step_outputs_are_produced_or_declared_optional() -> None:
         source = script + "\n" + helper_sources.get(step_id, "")
         assert step_id in scripts_by_id, f"missing step id {step_id} for output {output}"
         assert output in source or output.replace("-", "_") in source, (step_id, output)
+
+
+def test_action_does_not_depend_on_files_in_the_consumer_repo() -> None:
+    """The action must run in a repo that has no Python dependency manifest.
+
+    `actions/setup-python` with `cache: pip` hashes a dependency file from the
+    *calling* repo and hard-fails with "No file matched to
+    [**/requirements.txt or **/pyproject.toml]" when the consumer has neither at
+    its root. Setup Python is this action's first step, so that failure skips
+    every step after it and the gate silently evaluates nothing rather than
+    reporting a verdict. A live consumer-path smoke run caught exactly that.
+
+    Consumers legitimately look like this: a Node repo with a Python agent, a
+    repo whose pyproject.toml lives in a subdirectory, or one that vendors deps.
+    We install assert-ai from PyPI, so the cache is worth a few seconds and not
+    worth excluding those repos.
+    """
+    action = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
+
+    for step in action["runs"]["steps"]:
+        uses = step.get("uses", "")
+        if not uses.startswith("actions/setup-python"):
+            continue
+        with_block = step.get("with") or {}
+        assert "cache" not in with_block, (
+            f"{step.get('name')!r} sets cache={with_block.get('cache')!r}; this fails "
+            "in any consumer repo without a root requirements.txt or pyproject.toml, "
+            "which skips every later step and makes the gate a no-op."
+        )
+        assert "cache-dependency-path" not in with_block, (
+            f"{step.get('name')!r} pins cache-dependency-path to a consumer-repo file."
+        )
