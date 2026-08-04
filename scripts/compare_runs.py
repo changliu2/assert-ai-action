@@ -82,7 +82,10 @@ import numpy as np
 from scipy import stats
 
 
-ACTION_VERSION = "v1.0.0-rc1"
+try:
+    from _version import ACTION_VERSION
+except ImportError:  # invoked as a module rather than a script
+    from scripts._version import ACTION_VERSION
 DEFAULT_ALPHA = 0.05
 DEFAULT_MIN_PAIRS = 30
 DEFAULT_MIN_DISCORDANT_PAIRS = 2

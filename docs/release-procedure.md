@@ -14,6 +14,11 @@ $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
 python -m pytest tests/ -q
 ```
 
+Before tagging, bump `scripts/_version.py` to the version you are about to cut.
+That constant is stamped into every `gate_report.json` as `action_version`, so
+if it lags, customer bug reports cite a release that was never published.
+`tests/test_action_version.py` fails when it does not match the newest tag.
+
 Pick the next semver tag, then publish in this order:
 
 ```powershell

@@ -24,7 +24,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-ACTION_VERSION = "v1.0.0-rc1"
+try:
+    from _version import ACTION_VERSION
+except ImportError:  # invoked as a module rather than a script
+    from scripts._version import ACTION_VERSION
 
 
 def _find_file(root: Path, name: str) -> Path | None:
